@@ -1,0 +1,7 @@
+bin/
+obj/
+publish/
+var/
+var-dev/
+*.user
+.vs/

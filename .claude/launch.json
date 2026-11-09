@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mk-hq",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "src/MK.Hq.Api", "--environment", "Development", "--urls", "http://127.0.0.1:47320"],
+      "port": 47320
+    }
+  ]
+}

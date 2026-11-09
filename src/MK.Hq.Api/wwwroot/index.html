@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MK Billing</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f766e'/%3E%3Ctext x='16' y='22' font-size='15' font-family='Segoe UI,Arial' font-weight='700' text-anchor='middle' fill='white'%3EMK%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/app.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Main menu">
+      <div class="brand"><span class="logo">MK</span><div><strong>MK Billing</strong><small id="firm-period"></small></div></div>
+      <label class="firm-pick">Firm <select id="firm"></select></label>
+      <nav id="nav">
+        <a href="#/" data-key="F1">Dashboard</a>
+        <div class="nav-group">New</div>
+        <a href="#/capture" data-key="F11">Scan bill photo</a>
+        <a href="#/new/sale" data-key="F2">Sale bill</a>
+        <a href="#/new/salesOrder" data-key="F3">Estimate / order</a>
+        <a href="#/new/purchase" data-key="F4">Purchase</a>
+        <a href="#/voucher/cashReceipt" data-key="F5">Receipt</a>
+        <a href="#/voucher/cashPayment" data-key="F6">Payment</a>
+        <a href="#/voucher/creditNote">Credit / debit note</a>
+        <div class="nav-group">Masters</div>
+        <a href="#/items">Items</a>
+        <a href="#/accounts">Customers &amp; suppliers</a>
+        <div class="nav-group">Look up</div>
+        <a href="#/documents" data-key="F7">Bills &amp; vouchers</a>
+        <a href="#/ledger" data-key="F8">Account ledger</a>
+        <a href="#/outstanding" data-key="F9">Outstanding</a>
+        <a href="#/reports">Registers &amp; GST</a>
+        <a href="#/stock">Stock</a>
+        <a href="#/drafts">Drafts</a>
+        <div class="nav-group">System</div>
+        <a href="#/health">HQ health</a>
+        <a href="#/settings">Settings</a>
+      </nav>
+      <div class="live" id="live" title="Live link to HQ"><span class="dot"></span><span id="live-text">Connecting…</span></div>
+    </aside>
+    <main id="view" tabindex="-1"><p class="muted">Loading…</p></main>
+  </div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="modal-root"></div>
+  <div id="print-root"></div>
+</body>
+</html>
