@@ -5,3 +5,8 @@ var/
 var-dev/
 *.user
 .vs/
+
+# database backups (real firm data, too large for git)
+Databases/
+*.bak
+__pycache__/

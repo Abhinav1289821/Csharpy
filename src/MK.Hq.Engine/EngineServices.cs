@@ -28,6 +28,8 @@ public static class EngineServices
         services.AddSingleton<Vouchers.VoucherService>();
         services.AddSingleton<Masters.ItemMasterService>();
         services.AddSingleton<Masters.AccountMasterService>();
+        services.AddSingleton<Masters.ItemCleanupService>();
+        services.AddSingleton<Integrity.IntegrityService>();
         services.AddSingleton<Reports.ReportService>();
         services.AddSingleton<HqContract>();
         services.AddSingleton<Capture.AiSettings>();

@@ -29,6 +29,8 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
   let busy = false;
   let draftId = draft?.id ?? null;
   let draftVersion = draft?.version ?? 0;
+  let saved = false; // set once this bill is in HQ, so leaving it keeps no draft
+  let kept = null; // the bill as last kept in Drafts
 
   if (amendId) {
     original = await get(`/${firmId()}/documents/${amendId}`);
@@ -99,13 +101,17 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     if (!req.lines.length) { preview = null; renderTotals(); status.replaceChildren(el('div', { class: 'muted' }, 'Add items to see the bill.')); return; }
     if (key === previewKey && preview) return;
     previewKey = key;
+    const priced = filled(); // the line objects this preview prices, in request order
     try {
       const p = original
         ? await post(`/${firmId()}/documents/${original.summary.documentId}/amend/preview`, { operationId: '', documentId: original.summary.documentId, expectedHash: '', document: req, lineIds: lineIds(), allocations: 'preserve' })
         : await post(`/${firmId()}/documents/preview`, req);
       if (key !== previewKey) return;
       preview = original ? { ...p.replacement, hash: p.hash, warnings: p.warnings, released: p.releasedAllocations } : p;
-      status.replaceChildren(...(preview.warnings ?? []).map((w) => el('div', { class: 'issue warn' }, w)));
+      preview.priced = priced;
+      // Stock shortfalls show on their own line; HQ's round-off rule is a setting (HQ health), not news on every bill.
+      const shown = (preview.warnings ?? []).filter((w) => !/stock will go below zero|^Round-off .* is posted the way HQ posts it/.test(w));
+      status.replaceChildren(checklist(shown));
     } catch (e) {
       if (key !== previewKey) return;
       preview = null;
@@ -114,12 +120,18 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     renderTotals();
   }
   const schedulePreview = debounce(refreshPreview, 300);
+  // One warning reads as a line; several read as a numbered checklist in one box.
+  function checklist(items) {
+    if (!items.length) return null;
+    if (items.length === 1) return el('div', { class: 'issue warn' }, items[0]);
+    return el('div', { class: 'checklist' }, el('strong', {}, `Check before saving · ${items.length}`), el('ol', {}, items.map((w) => el('li', {}, w))));
+  }
   const lineIds = () => filled().map((l) => l.lineId ?? null);
 
   function renderTotals() {
     amounts.clear();
     const q = preview?.quote;
-    if (q) filled().forEach((l, i) => amounts.set(l, q.lines[i]));
+    if (q) (preview.priced ?? []).forEach((l, i) => { if (q.lines[i]) amounts.set(l, q.lines[i]); });
     for (const [l, cell] of amountCells) cell.textContent = amounts.has(l) ? money(amounts.get(l).net) : '';
     const rows = q ? [
       ['Items', filled().length], ['Quantity', qty(q.quantity)], ['Gross', money(q.gross)], ['Discount', money(q.discount)], ['Taxable', money(q.taxable)],
@@ -127,7 +139,7 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     ] : [];
     totals.replaceChildren(
       el('dl', {}, rows.map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
-      el('div', { class: 'grand' }, q ? '₹ ' + money(q.payable) : '—'),
+      el('div', { class: q ? 'grand' : 'grand empty', 'data-label': KINDS[doc.kind].inward ? 'Bill amount' : 'Payable' }, '₹ ' + money(q ? q.payable : 0)),
       preview ? el('div', { class: 'muted' }, `${preview.typeName} · ${original ? original.summary.reference : preview.series + '/' + preview.nextNumberHint + ' (next)'} · ${preview.paymentCaption}`) : null,
       doc.capture?.printedTotal != null
         ? (q && Number(q.payable) === Number(doc.capture.printedTotal)
@@ -142,6 +154,14 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
   const credit = () => doc.paymentMode === 1;
   const bank = () => doc.paymentMode > 1;
   const header = el('div', { class: 'bill-head' });
+  let partyFocused = false; // the customer box takes focus once, when the bill opens
+  const firstItemInput = () => [...body.querySelectorAll('input.item')].find((i) => !i.value) ?? body.querySelector('input.item');
+  // Enter in the bill head moves on to the items (a lookup that just picked something has already handled its Enter).
+  header.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.defaultPrevented || e.target.tagName !== 'INPUT') return;
+    e.preventDefault();
+    firstItemInput()?.focus();
+  });
 
   function partyFilter(p) {
     if (bank()) return p.isBank;
@@ -153,31 +173,47 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     const modes = KINDS[doc.kind].order ? [] : paymentModes().filter((m) => (KINDS[doc.kind].inward ? m.id <= 1 : m.id !== 3));
     const field = (label, input) => el('label', { class: 'field' }, el('span', {}, label), input);
     const bind = (obj, key, attrs = {}) => {
-      const i = el('input', { value: obj[key] ?? '', ...attrs });
+      const i = el('input', { value: obj[key] ?? '', 'data-bind': key, ...attrs });
       i.addEventListener('input', () => { obj[key] = i.value; schedulePreview(); });
       return i;
     };
     const selected = doc.accountId ? party(doc.accountId) : null;
     const partyBox = lookup({
-      placeholder: credit() ? 'Search account…' : bank() ? 'Search bank ledger…' : 'Customer name (or search an account)',
+      placeholder: credit() ? 'Search account…' : bank() ? 'Search bank ledger…' : KINDS[doc.kind].inward ? 'Supplier name (or search an account)' : 'Customer name (or search an account)',
       value: credit() || bank() ? (selected?.name ?? '') : doc.party.name,
       search: (t) => searchParties(t, partyFilter).map((p) => ({ label: p.name, hint: [p.town, p.gstin, p.balance ? '₹' + money(p.balance) : ''].filter(Boolean).join(' · '), value: p })),
-      onInput: (t) => { if (!credit() && !bank()) { doc.party.name = t; doc.accountId = null; schedulePreview(); } },
+      onInput: (t) => {
+        if (credit() || bank()) return;
+        if (doc.accountId) {
+          // Retyping after picking an account: that account's town/phone/GSTIN no longer apply.
+          Object.assign(doc.party, { town: '', phone: '', gstin: '' });
+          for (const k of ['town', 'phone', 'gstin']) { const box = header.querySelector(`[data-bind="${k}"]`); if (box) box.value = ''; }
+        }
+        doc.party.name = t; doc.accountId = null; schedulePreview();
+      },
+      // A walk-in name is kept as typed; an existing account is used only when chosen with ↓.
+      explicit: !credit() && !bank(),
       onPick: (p) => {
         doc.accountId = p.accountId;
         if (!credit() && !bank()) Object.assign(doc.party, { name: p.name, town: p.town, phone: p.mobile || p.phone, gstin: p.gstin });
         renderHeader();
         schedulePreview();
-        header.querySelector('.after-party')?.focus();
+        (header.querySelector('.after-party') ?? firstItemInput())?.focus();
       },
-      autofocus: !original && doc.lines.length === 1,
+      autofocus: !original && !partyFocused && doc.lines.length === 1,
     });
+    partyFocused = true;
     const cash = !credit() && !bank();
+    // A bill dated other than today is easy to miss; mark it.
+    const dateBox = bind(doc, 'date', { type: 'date' });
+    const dateField = field(doc.date === today() ? 'Date' : 'Date · not today', dateBox);
+    const markDate = () => { const off = doc.date !== today(); dateField.classList.toggle('off-today', off); dateField.firstChild.textContent = off ? 'Date · not today' : 'Date'; };
+    dateBox.addEventListener('input', markDate);
+    markDate();
     header.replaceChildren(
-      field('Date', bind(doc, 'date', { type: 'date' })),
+      el('label', { class: 'field party-field' }, el('span', {}, bank() ? 'Bank / UPI ledger' : KINDS[doc.kind].inward ? 'Supplier' : 'Customer'), partyBox.wrap),
       modes.length ? field('Payment', el('select', { onchange: (e) => { doc.paymentMode = Number(e.target.value); doc.accountId = null; renderHeader(); schedulePreview(); } },
         modes.map((m) => el('option', { value: m.id, selected: m.id === doc.paymentMode }, m.caption)))) : null,
-      el('label', { class: 'field', style: { gridColumn: 'span 2' } }, el('span', {}, credit() ? (KINDS[doc.kind].inward ? 'Supplier' : 'Customer') : bank() ? 'Bank / UPI ledger' : 'Customer'), partyBox.wrap),
       bank() ? field('Paid by (name)', bind(doc.party, 'name', { class: 'after-party' })) : null,
       cash || bank() ? field('Town', bind(doc.party, 'town', { class: cash ? 'after-party' : '' })) : null,
       cash || bank() ? field('Phone', bind(doc.party, 'phone')) : null,
@@ -185,6 +221,8 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
       credit() && selected ? el('div', { class: 'field muted' }, el('span', {}, 'Account'), el('div', {}, [selected.town, selected.gstin, 'Balance ₹ ' + money(selected.balance)].filter(Boolean).join(' · '))) : null,
       doc.kind === 'purchase' ? field('Supplier bill no.', bind(doc.supplier, 'number', { maxlength: 20, class: 'after-party' })) : null,
       doc.kind === 'purchase' ? field('Supplier bill date', bind(doc.supplier, 'date', { type: 'date' })) : null,
+      // Fields that rarely change sit in a quieter second row.
+      el('div', { class: 'bill-head-more' }, dateField,
       field('Prices', el('select', { onchange: (e) => { doc.basis = e.target.value || null; schedulePreview(); } },
         el('option', { value: '' }, 'HQ default'), el('option', { value: 'inclusive', selected: doc.basis === 'inclusive' }, 'Include GST'),
         el('option', { value: 'exclusive', selected: doc.basis === 'exclusive' }, 'Plus GST'))),
@@ -192,7 +230,7 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
         el('input', { type: 'checkbox', checked: doc.interstate, onchange: (e) => { doc.interstate = e.target.checked; schedulePreview(); } })) : null,
       (state.firm.salespeople ?? []).length && !KINDS[doc.kind].inward ? field('Salesman', el('select', { onchange: (e) => { doc.salespersonId = e.target.value ? Number(e.target.value) : null; schedulePreview(); } },
         el('option', { value: '' }, '—'), state.firm.salespeople.map((s) => el('option', { value: s.id, selected: s.id === doc.salespersonId }, s.name)))) : null,
-      field('Narration', bind(doc, 'notes', { maxlength: 1500 })),
+      field('Narration', bind(doc, 'notes', { maxlength: 1500 }))),
     );
   }
 
@@ -210,7 +248,7 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     const it = l.itemId ? item(l.itemId, l.unitId) : null;
     const num = (key, cls) => {
       const input = el('input', { class: 'num ' + cls, value: l[key], inputmode: 'decimal' });
-      input.addEventListener('input', () => { l[key] = input.value.replace(/[^0-9.]/g, ''); schedulePreview(); });
+      input.addEventListener('input', () => { l[key] = input.value.replace(/[^0-9.]/g, ''); if (key === 'quantity') markStock(); schedulePreview(); });
       input.addEventListener('keydown', (e) => {
         if (e.key !== 'Enter') return;
         e.preventDefault();
@@ -238,10 +276,19 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
       className: 'item',
     });
     const amount = el('td', { class: 'n col-a' });
+    // Selling more than HQ shows in stock is flagged on the line itself, and follows the quantity as it is typed.
+    const stockNote = el('span');
+    const markStock = () => {
+      if (!it) return;
+      const short = !KINDS[doc.kind].inward && !KINDS[doc.kind].order && Number(it.stock) - Number(l.quantity || 0) < 0;
+      stockNote.className = short ? 'short' : '';
+      stockNote.textContent = `stock ${qty(it.stock)}${short ? ' · short' : ''}`;
+    };
+    markStock();
     amountCells.set(l, amount);
     return el('tr', {},
       el('td', { class: 'muted' }, i + 1),
-      el('td', { class: 'col-item' }, pick.wrap, it ? el('small', { class: 'muted' }, `${it.unit} · HSN ${it.hsn || '—'} · stock ${qty(it.stock)}${l.orderLineId ? ' · from order' : ''}`) : null,
+      el('td', { class: 'col-item' }, pick.wrap, it ? el('small', { class: 'muted' }, `${it.unit} · HSN ${it.hsn || '—'} · `, stockNote, l.orderLineId ? ' · from order' : '') : null,
         l.sourceText ? photoHints(l, i) : null),
       el('td', { class: 'col-q' }, num('quantity', 'q')),
       el('td', { class: 'col-r' }, num('rate', 'r')),
@@ -260,7 +307,7 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     };
     const sure = l.confirmed || (l.itemId && l.match?.reason === 'learned');
     return el('div', { style: { fontSize: '12px', marginTop: '2px' } },
-      el('div', { class: 'muted' }, '📷 ', el('i', {}, l.sourceText), l.written?.amount ? ` · printed ₹${money(l.written.amount)}` : ''),
+      el('div', { class: 'muted' }, 'Photo: ', el('i', {}, l.sourceText), l.written?.amount ? ` · printed ₹${money(l.written.amount)}` : ''),
       !sure && cands.length ? el('div', { class: 'row', style: { gap: '4px', marginTop: '3px' } },
         el('span', { class: l.itemId ? 'muted' : 'pill warn' }, l.itemId ? 'Or:' : 'Choose:'),
         cands.filter((x) => x.itemId !== l.itemId).slice(0, 4).map((x) => el('button', { class: 'btn small', title: (x.notes ?? []).join('; '), onclick: () => pickCandidate(x) },
@@ -281,7 +328,7 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
       previewKey = '';
       await refreshPreview();
       if (!preview) return;
-      if (!original && !KINDS[doc.kind].order && doc.paymentMode === 0 && !doc.party.name.trim()) { toast('Enter the customer name', true); return; }
+      if (!original && !KINDS[doc.kind].order && doc.paymentMode === 0 && !doc.party.name.trim()) { toast('Enter the customer name', true); header.querySelector('.lookup input')?.focus(); return; }
       const req = request();
       let receipt;
       if (original) {
@@ -289,11 +336,13 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
         if (!ok) return;
         receipt = await post(`/${firmId()}/documents/${original.summary.documentId}/amend`,
           { operationId: opId(), documentId: original.summary.documentId, expectedHash: preview.hash, document: req, lineIds: lineIds(), allocations: ok });
+        saved = true;
         toast(`Saved changes to ${receipt.reference}`);
         location.hash = `#/doc/${receipt.documentId}`;
         return;
       }
       receipt = await post(`/${firmId()}/documents`, { operationId: opId(), expectedHash: preview.hash, document: req });
+      saved = true;
       if (doc.capture?.id) {
         // Remember "this wording means this HQ item" so the next bill from the same supplier matches itself.
         const learned = filled().filter((l) => l.sourceText).map((l) => ({ sourceText: l.sourceText, name: l.written?.name ?? null, itemId: l.itemId, unitId: l.unitId }));
@@ -327,47 +376,55 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
   async function afterSave(r) {
     const choice = await modal((close) => [
       el('h1', {}, `Saved ${r.reference}`),
-      el('p', { class: 'muted' }, `₹ ${money(r.total)} · now in HQ exactly as if entered there.`),
+      // The figure the operator says to the customer, big enough to read across the counter.
+      el('div', { class: 'saved-amount' }, el('span', {}, doc.paymentMode === 1 ? 'Added to account' : KINDS[doc.kind].inward ? 'Bill total' : 'Collect'), el('strong', {}, '₹ ' + money(r.total))),
+      el('p', { class: 'muted' }, 'Now in HQ exactly as if entered there.'),
       el('div', { class: 'row', style: { justifyContent: 'flex-end' } },
-        el('button', { class: 'btn', onclick: () => close('open') }, 'Open bill'),
-        el('button', { class: 'btn', onclick: () => close('print') }, 'Print (P)'),
+        el('button', { class: 'btn', 'data-key': 'o', onclick: () => close('open') }, 'Open bill (O)'),
+        el('button', { class: 'btn', 'data-key': 'p', onclick: () => close('print') }, 'Print (P)'),
         el('button', { class: 'btn primary', onclick: () => close('new') }, 'Next bill (Enter)')),
     ]);
+    window.removeEventListener('hashchange', onLeave);
+    window.removeEventListener('beforeunload', onUnload);
     if (choice === 'print') { await printDocument(r.documentId); billView(root, { kind: doc.kind }); }
     else if (choice === 'open') location.hash = `#/doc/${r.documentId}`;
     else billView(root, { kind: doc.kind });
   }
 
-  async function saveDraft() {
+  async function saveDraft(quiet = false) {
     const id = draftId ?? crypto.randomUUID();
-    const title = `${KINDS[doc.kind].title} · ${doc.party.name || party(doc.accountId)?.name || 'no party'} · ${filled().length} lines`;
+    const title = `${KINDS[doc.kind].title} · ${doc.party.name || party(doc.accountId)?.name || 'no party'} · ${filled().length} ${filled().length === 1 ? 'line' : 'lines'}`;
     const saved = await put(`/${firmId()}/drafts/${id}`, { kind: doc.kind, title, payload: doc, version: draftVersion });
     draftId = saved.id;
     draftVersion = saved.version;
-    toast('Draft saved (not in HQ yet)');
+    kept = JSON.stringify(doc);
+    toast(quiet ? `Unsaved ${KINDS[doc.kind].title.toLowerCase()} kept in Drafts` : 'Draft saved (not in HQ yet)');
   }
 
   // ---------------------------------------------------------------- layout
   const saveBtn = el('button', { class: 'btn primary', onclick: save }, original ? 'Save changes (F10)' : 'Save to HQ (F10)');
   root.replaceChildren(
-    el('div', { class: 'row spread' },
+    el('div', { class: 'page-head' },
       el('div', {}, el('h1', {}, original ? `Edit ${original.summary.reference}` : doc.sourceOrderId ? 'Sale from order' : KINDS[doc.kind].title),
-        el('div', { class: 'muted' }, original ? `${original.summary.typeName} · ${original.party.name}` : 'Type to search items; Enter moves on. F10 saves.')),
+        el('div', { class: 'muted' }, original ? `${original.summary.typeName} · ${original.party.name}` : 'Fill the party, then type item names below.')),
       el('div', { class: 'row' }, !original ? el('button', { class: 'btn', onclick: saveDraft }, 'Save draft') : null, saveBtn)),
-    el('div', { class: 'panel', style: { marginTop: '12px' } }, header),
+    el('div', { class: 'panel bill-head-panel' }, header),
     doc.capture ? photoPanel() : null,
-    el('div', { class: 'bill-layout', style: { marginTop: '12px' } },
-      el('div', { class: 'panel' }, el('table', { class: 'grid bill-grid' },
+    el('div', { class: 'bill-layout' },
+      el('div', { class: 'panel flush' }, el('table', { class: 'grid bill-grid' },
         el('thead', {}, el('tr', {}, el('th', {}, '#'), el('th', {}, 'Item'), el('th', { class: 'n' }, 'Qty'), el('th', { class: 'n' }, 'Rate'), el('th', { class: 'n' }, 'Disc %'), el('th', { class: 'n' }, 'Amount'), el('th', {}))),
         body)),
-      el('div', { class: 'panel totals stack' }, totals, status, ledgerBox)));
+      el('div', { class: 'panel totals stack' }, el('div', { class: 'totals-title' }, 'Bill total'), totals, status, ledgerBox)),
+    el('div', { class: 'keyhelp' },
+      el('span', {}, el('kbd', {}, 'Enter'), ' next box'), el('span', {}, el('kbd', {}, '↑'), el('kbd', {}, '↓'), ' choose from list'),
+      el('span', {}, el('kbd', {}, 'Tab'), ' pick'), el('span', {}, el('kbd', {}, 'F10'), ' save to HQ'), el('span', {}, el('kbd', {}, 'Esc'), ' close list')));
 
   function photoPanel() {
     const cap = doc.capture;
     const pages = Math.max(1, cap.pages ?? 1);
     let zoom = 1;
     const imgs = Array.from({ length: pages }, (_, n) => el('img', { src: pageUrl(cap.id, n + 1), alt: `Bill page ${n + 1}`, style: { width: '100%', display: 'block', background: '#fff', marginBottom: '6px' } }));
-    const frame = el('div', { style: { maxHeight: '46vh', overflow: 'auto', borderRadius: '6px', border: '1px solid var(--line)' } }, imgs);
+    const frame = el('div', { style: { maxHeight: '36vh', overflow: 'auto', borderRadius: '6px', border: '1px solid var(--line)' } }, imgs);
     const setZoom = (z) => { zoom = z; imgs.forEach((i) => (i.style.width = `${zoom * 100}%`)); };
     return el('details', { class: 'panel', open: true, style: { marginTop: '12px' } },
       el('summary', {}, `Bill photo · read by ${cap.model}`, cap.printedTotal != null ? ` · printed total ₹${money(cap.printedTotal)}` : ''),
@@ -376,7 +433,7 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
         el('a', { class: 'btn small', href: pageUrl(cap.id, 1), target: '_blank' }, 'Open full size'),
         el('a', { class: 'btn small', href: '#/capture' }, 'All scans')),
       frame,
-      (cap.warnings ?? []).length ? el('div', { class: 'stack', style: { marginTop: '8px', gap: '4px' } }, cap.warnings.map((w) => el('div', { class: 'issue warn' }, w))) : null);
+      (cap.warnings ?? []).length ? el('div', { style: { marginTop: '10px' } }, checklist(cap.warnings)) : null);
   }
 
   // This render's own marker: after "Next" re-renders into the same root, the old handler must retire, or F10 would
@@ -388,7 +445,18 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     if (e.key === 'F10' || (e.ctrlKey && e.key.toLowerCase() === 's')) { e.preventDefault(); save(); }
   };
   document.addEventListener('keydown', keys);
+  // Leaving a half-made bill (a stray F-key, a menu click) keeps it in Drafts instead of losing it.
+  const unsaved = () => !saved && !original && filled().length > 0 && JSON.stringify(doc) !== kept;
+  const onLeave = () => {
+    window.removeEventListener('hashchange', onLeave);
+    window.removeEventListener('beforeunload', onUnload);
+    if (unsaved()) saveDraft(true).catch((e) => toast('Could not keep the unsaved bill: ' + e.message, true));
+  };
+  const onUnload = (e) => { if (alive.isConnected && unsaved()) { e.preventDefault(); e.returnValue = ''; } };
+  window.addEventListener('hashchange', onLeave);
+  window.addEventListener('beforeunload', onUnload);
   renderHeader();
   renderLines();
   refreshPreview();
+  kept = draftId ? JSON.stringify(doc) : null; // a reopened draft left unchanged is not saved again
 }

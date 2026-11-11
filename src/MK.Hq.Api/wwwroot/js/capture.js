@@ -43,7 +43,7 @@ export async function captureView(root) {
     return el('div', { class: 'panel row', style: { alignItems: 'flex-start' } },
       el('div', { class: 'row', style: { gap: '6px' } }, Array.from({ length: c.pages }, (_, i) =>
         el('a', { href: pageUrl(c.id, i + 1, c.updatedAt), target: '_blank', title: `Page ${i + 1}` },
-          el('img', { src: pageUrl(c.id, i + 1, c.updatedAt), alt: `Page ${i + 1}`, style: { width: '92px', height: '120px', objectFit: 'cover', border: '1px solid var(--line)', borderRadius: '6px', background: '#fff' } })))),
+          el('img', { src: pageUrl(c.id, i + 1, c.updatedAt), alt: `Page ${i + 1}`, style: { width: '92px', height: '120px', objectFit: 'cover', border: '1px solid var(--line)', background: '#fff' } })))),
       el('div', { class: 'grow stack', style: { gap: '6px' } },
         el('div', { class: 'row' }, el('strong', {}, KINDS.find((k) => k[0] === c.kind)?.[1] ?? c.kind), el('span', { class: 'pill ' + tone }, label),
           el('span', { class: 'muted' }, `${new Date(c.createdAt).toLocaleString('en-IN')} · ${c.source}${c.pages > 1 ? ' · ' + c.pages + ' pages' : ''}${c.elapsedMs ? ' · read in ' + Math.round(c.elapsedMs / 1000) + ' s' : ''}`)),
@@ -71,7 +71,7 @@ export async function captureView(root) {
   }
 
   const picker = el('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, onchange: (e) => { addFiles([...e.target.files]); e.target.value = ''; } });
-  const drop = el('div', { class: 'panel', style: { border: '2px dashed var(--line)', textAlign: 'center', padding: '22px' },
+  const drop = el('div', { class: 'panel', style: { border: '1.5px dashed var(--line)', textAlign: 'center', padding: '24px' },
     ondragover: (e) => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; },
     ondragleave: () => (drop.style.borderColor = 'var(--line)'),
     ondrop: (e) => { e.preventDefault(); drop.style.borderColor = 'var(--line)'; addFiles([...e.dataTransfer.files].filter((f) => f.type.startsWith('image/') || /\.(bmp|png|jpe?g|webp|tiff?)$/i.test(f.name))); } },

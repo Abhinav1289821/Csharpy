@@ -158,6 +158,44 @@ Deliberate differences from HQ (each is HQ's own behaviour being unsafe, not a s
 * Account names and addresses refuse apostrophes and non-Latin text (HQ doubles the first and turns the second into `?`).
   Item names keep apostrophes, since the shop types `''` as an inch mark.
 
+## Tidying item names (the owner's guided review)
+
+1. `sqlcmd … -i tools\item-cleanup\export.sql` per firm, then `python tools\item-cleanup\propose.py <export folder> "docs\item-cleanup\Item names review.xlsx" [filled-in review.xlsx]`.
+   This writes the review sheet and `docs\item-cleanup\proposals-<MBM|MP>.json`; answers already typed in a filled-in sheet are carried over.
+2. In MK: *Tidy item names* → *Load the list*. The owner answers in steps: automatic fixes (no questions), one question per
+   formatting rule, one card per real decision (duplicates show the look-alike's sales and stock), one ticked list of items to
+   retire, one card per GST/HSN point. Answers are saved as he goes (`var\cleanup.db`, never in HQ).
+3. *Write to HQ* saves each item through the HQ-identical item save, leaves alone anything changed in HQ since the list was
+   made (`ItemCleanupTests`). His rules: sizes with `*`; spelling/capitals/spaces need no
+   approval; 63/75/90/110 MM elbows and tees say HEAVY, not ISI.
+
+## Assistant (Google Antigravity, over ACP)
+
+The *Assistant* button in the letterhead (Alt+A) opens a conversation docked beside every screen. It is Google
+Antigravity's agent, using the shop's own Antigravity subscription (Google AI Pro), so there is no API key to manage.
+
+```
+browser panel (js/assistant.js) ──/api/agent──▶ AgentHub ──stdin/stdout, ACP v1──▶ agy acp (Antigravity CLI)
+                                                                                      │ HTTP MCP, per-chat bearer key
+                          AgentTools ◀──────────────── POST /mcp ◀────────────────────┘
+```
+
+* **ACP:** `AgentHub` starts one `agy acp --process-per-session --sandbox` for the service and opens one ACP session per
+  conversation. It declares no file or terminal access. Commands and file edits are refused automatically; any other
+  permission request is shown to the user. Replies, tool calls and plans stream to the browser over SSE; the model
+  (Gemini, Claude, GPT-OSS, whatever the plan offers) can be switched per conversation.
+* **MCP:** each session gets MK's tools at `/mcp` with its own key: look up parties and items, ledgers, outstanding,
+  bills, day figures, stock, GST registers, HQ table columns and **one read-only SELECT** (no writes, no semicolons,
+  dirty reads so it never holds up an HQ PC, rolled back anyway), plus `open_screen` (moves the user's window) and
+  `prepare_bill`.
+* **No AI writes to HQ.** `prepare_bill` saves a *draft* in the bill editor's own format (as photo drafts are), prices it
+  with HQ's arithmetic and opens it. The user checks it and presses F10, which goes through the normal reviewed save.
+* **Set-up on a PC:** `irm https://antigravity.google/cli/install.ps1 | iex`, then `agy` once in a terminal (sign in with
+  Google, say hi). The sign-in lives in Windows Credential Manager, so the service must run in the same Windows user's
+  desktop session (as the launcher does); an SSH session cannot see it. The panel's *Sign in…* button opens
+  `agy acp --login` on the PC. Optional settings: `"Agent": { "AgyPath": …, "Arguments": [...], "ToolsBaseUrl": … }`.
+* Conversations live in memory: a restart of the service starts fresh ones.
+
 ## Scope
 
 Done: sales (cash, credit, card/UPI modes), IGST bills, estimates/sales orders and making a sale from an order,

@@ -66,7 +66,7 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
     try {
       preview = await post(edit ? `/${firmId()}/vouchers/${edit.documentId}/amend/preview` : `/${firmId()}/vouchers/preview`, req);
       status.replaceChildren(...preview.warnings.map((w) => el('div', { class: 'issue warn' }, w)),
-        el('div', { class: 'grand', style: { fontSize: '22px', fontWeight: 700 } }, '₹ ' + money(preview.total)),
+        el('div', { class: 'grand', 'data-label': note ? 'Note total' : receipt ? 'Received' : 'Paid' }, '₹ ' + money(preview.total)),
         el('div', { class: 'muted' }, edit ? `${edit.reference} (corrected in place)` : `${preview.series}/${preview.nextNumberHint} (next)`));
       ledger.replaceChildren(el('details', {}, el('summary', {}, 'HQ ledger entries'), el('table', { class: 'grid' }, el('tbody', {},
         preview.ledger.map((r) => el('tr', {}, el('td', {}, r.accountName), el('td', {}, r.type), el('td', { class: 'n' }, money(r.amount))))))));
@@ -148,7 +148,19 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
     });
     const amount = el('input', { class: 'num amount', value: l.amount, inputmode: 'decimal', placeholder: '0.00' });
     amount.addEventListener('input', () => { l.amount = amount.value.replace(/[^0-9.]/g, ''); schedule(); });
-    const noteBox = el('input', { value: l.notes, placeholder: note ? 'Reason (e.g. special discount, rate difference)' : 'Note (e.g. UTR / cheque details)' });
+    // Enter after the amount: settle the oldest bills first (if nothing is settled by hand yet), then the note.
+    amount.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (l.open.length && !l.allocations.some((a) => Number(a.amount) > 0) && Number(l.amount) > 0) {
+        let left = Number(l.amount);
+        l.allocations = l.open.map((o) => { const take = Math.min(left, o.open); left = Math.round((left - take) * 100) / 100; return { entryId: o.entryId, amount: take > 0 ? take.toFixed(2) : '' }; });
+        render();
+        schedule();
+        linesBox.children[i]?.querySelector('input[data-note]')?.focus();
+      } else noteBox.focus();
+    });
+    const noteBox = el('input', { value: l.notes, 'data-note': '', placeholder: note ? 'Reason (e.g. special discount, rate difference)' : 'Note (e.g. UTR / cheque details)' });
     noteBox.addEventListener('input', () => { l.notes = noteBox.value; schedule(); });
     const bankRow = l.bank ? el('div', { class: 'row' },
       el('label', { class: 'field' }, el('span', {}, 'Mode'), el('select', { onchange: (e) => { l.bank.method = Number(e.target.value); schedule(); } },
@@ -173,7 +185,8 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
         ? await post(`/${firmId()}/vouchers/${edit.documentId}/amend`, { operationId: opId(), expectedHash: preview.hash, voucher: request() })
         : await post(`/${firmId()}/vouchers`, { operationId: opId(), expectedHash: preview.hash, voucher: request() });
       loadCatalogue().catch(() => {});
-      await modal((close) => [el('h1', {}, `${edit ? 'Corrected' : 'Saved'} ${r.reference}`), el('p', { class: 'muted' }, `₹ ${money(r.total)} · in HQ`),
+      await modal((close) => [el('h1', {}, `${edit ? 'Corrected' : 'Saved'} ${r.reference}`),
+        el('div', { class: 'saved-amount' }, el('span', {}, note ? TITLES[kind] : receipt ? 'Received' : 'Paid'), el('strong', {}, '₹ ' + money(r.total))), el('p', { class: 'muted' }, 'Now in HQ.'),
         el('div', { class: 'row', style: { justifyContent: 'flex-end' } }, el('button', { class: 'btn primary', onclick: () => close() }, edit ? 'Open voucher (Enter)' : 'Next (Enter)'))]);
       if (edit) location.hash = `#/doc/${edit.documentId}`;
       else voucherView(root, kind);

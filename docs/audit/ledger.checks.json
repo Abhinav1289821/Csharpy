@@ -1,0 +1,426 @@
+[
+    {
+        "id":  "LED-ROUNDOFF-CONFIG",
+        "area":  "ledger",
+        "title":  "Round-off charge configured as 'Less'",
+        "severity":  "warning",
+        "why":  "HQ posts each charge by its Add/Less type (FrmInwards.AccountPosting_GST). With Round Off set to 'Less' every rounded bill posts the round-off on the wrong side, so the bill's ledger is off by twice the round-off and the Round off account carries the wrong sign. Future bills keep doing this until the charge type is changed.",
+        "detectSql":  "SELECT DISTINCT 'Charge '+RTRIM(c.Chrg_Name)+' ('+CAST(c.Chrg_Id AS varchar(6))+') is type Less in charge set '+CAST(cs.Set_No AS varchar(6)) AS Finding FROM dbo.IQCHARGES c JOIN dbo.IQCHRGSETS cs ON cs.Chrg_Id=c.Chrg_Id JOIN dbo.IQCHRG_TYPES t ON t.ChTp_ID=c.Chrg_Type JOIN dbo.TTypes tt ON tt.vousetno=cs.Set_No AND tt.RoundedOffTo>0 WHERE ISNULL(t.ChTp_Op,0)=0 AND c.Chrg_Name LIKE '%round%'",
+        "counts":  {
+                       "mbm":  3,
+                       "mp":  0
+                   },
+        "examples":  [
+                         "MBM: Charge Round Off (73) is type Less in charge set 23",
+                         "MBM: Charge Round Off (73) is type Less in charge set 26",
+                         "MBM: Charge Round Off (73) is type Less in charge set 24"
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "Ask the owner: 'May we change the Round Off charge (73) to type Add in HQ's charge master, as MK Paints already has it?' Do it in HQ (Masters > Charges), not by SQL; the equivalent row change is UPDATE IQCHARGES SET Chrg_Type=5 WHERE Chrg_Id=73. Only after that does LED-ROUNDOFF-2X become auto-repairable. The MK prototype's purchase charge 'MK Core Round purchase' (type Add) already posts correctly."
+    },
+    {
+        "id":  "LED-ROUNDOFF-2X",
+        "area":  "ledger",
+        "title":  "Bills off by twice their round-off (Less rule)",
+        "severity":  "warning",
+        "why":  "Each such bill's debits and credits differ by 2 x round-off: the Round off account, and for cash bills the cash book, are wrong by paise per bill (about Rs 241 in total in MBM). Party balances and GST are not affected (the party row equals Bill_Amt; GST returns use the item lines).",
+        "detectSql":  "SELECT 'Round-off on the wrong side: '+RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' ('+CONVERT(varchar(10),h.Doc_Date,103)+')'+' off by '+CAST(CAST(2*r.rnd AS decimal(12,2)) AS varchar(20)) AS Finding, CAST(h.Doc_Id AS bigint) AS Doc_Id FROM dbo.IQDoc_Header h CROSS APPLY (SELECT SUM(ABS(c.Amount)) AS rnd, MIN(c.Act_ID) AS act, MAX(c.Act_ID) AS act2 FROM dbo.IQDoc_Chrgs c JOIN dbo.IQCHARGES m ON m.Chrg_Id=c.Chrg_id JOIN dbo.IQCHRG_TYPES t ON t.ChTp_ID=m.Chrg_Type WHERE c.Doc_id=h.Doc_Id AND ISNULL(t.ChTp_Op,0)=0 AND m.Chrg_Name LIKE '%round%' AND c.Amount<>0) r CROSS APPLY (SELECT SUM(CASE z.TYPE WHEN 'D' THEN z.AMOUNT WHEN 'C' THEN -z.AMOUNT ELSE 0 END)      + SUM(CASE z.TYPE WHEN 'R' THEN z.AMOUNT WHEN 'P' THEN -z.AMOUNT ELSE 0 END)      - CASE WHEN h.Mode=0 AND h.Tt_Id IN (204,506,507) THEN h.Bill_Amt WHEN h.Mode=0 AND h.Tt_Id IN (206,500,501) THEN -h.Bill_Amt ELSE 0 END AS diff FROM dbo.IQDayBook z WHERE z.Doc_ID=h.Doc_Id) b WHERE h.Tt_Id IN (500,501,506,507) AND r.rnd>0 AND ABS(b.diff)>0.005 AND ABS(ABS(b.diff)-2*r.rnd)<0.006",
+        "counts":  {
+                       "mbm":  466,
+                       "mp":  0
+                   },
+        "examples":  [
+                         "MBM: Round-off on the wrong side: CS/3 (02/04/2026) off by 0.80",
+                         "MBM: Round-off on the wrong side: CS/4 (03/04/2026) off by 0.02",
+                         "MBM: Round-off on the wrong side: CS/6 (03/04/2026) off by 0.40",
+                         "MBM: Round-off on the wrong side: CS/11 (04/04/2026) off by 0.10",
+                         "MBM: Round-off on the wrong side: CS/15 (05/04/2026) off by 1.00"
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "This is HQ's own posting under the current configuration, so it is not a data error HQ would correct by itself: re-saving a bill in HQ reproduces it. Owner question: 'After switching Round Off to Add, should past bills be corrected too? Bills dated before 1 Oct 2026 belong to periods whose books/returns may be closed.' If yes, the prepared statement (tested: clears every finding in MBM, rolled back) flips the side of the single round-off row, which is exactly what HQ's Add-rule posting (InvoiceLedger.Plan with IsAdd) produces; it touches only rows where the round-off account carries nothing else. Suggested scope: Doc_Date >= '2026-10-01' first. Prepared repair (owner approval required, tested rolled back: mbm before=466 rowsAffected=466 after=0 blViolationsAfter=0; mp before=0 rowsAffected=0 after=0 blViolationsAfter=0): UPDATE d SET d.TYPE = CASE d.TYPE WHEN 'D' THEN 'C' WHEN 'C' THEN 'D' WHEN 'P' THEN 'R' WHEN 'R' THEN 'P' END FROM dbo.IQDayBook d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_ID CROSS APPLY (SELECT SUM(ABS(c.Amount)) AS rnd, MIN(c.Act_ID) AS act, MAX(c.Act_ID) AS act2 FROM dbo.IQDoc_Chrgs c JOIN dbo.IQCHARGES m ON m.Chrg_Id=c.Chrg_id JOIN dbo.IQCHRG_TYPES t ON t.ChTp_ID=m.Chrg_Type WHERE c.Doc_id=h.Doc_Id AND ISNULL(t.ChTp_Op,0)=0 AND m.Chrg_Name LIKE '%round%' AND c.Amount<>0) r CROSS APPLY (SELECT COUNT(*) AS n FROM dbo.IQDayBook y WHERE y.Doc_ID=h.Doc_Id AND y.Act_ID=r.act) x CROSS APPLY (SELECT SUM(CASE z.TYPE WHEN 'D' THEN z.AMOUNT WHEN 'C' THEN -z.AMOUNT ELSE 0 END) + SUM(CASE z.TYPE WHEN 'R' THEN z.AMOUNT WHEN 'P' THEN -z.AMOUNT ELSE 0 END) - CASE WHEN h.Mode=0 AND h.Tt_Id IN (204,506,507) THEN h.Bill_Amt WHEN h.Mode=0 AND h.Tt_Id IN (206,500,501) THEN -h.Bill_Amt ELSE 0 END AS diff FROM dbo.IQDayBook z WHERE z.Doc_ID=h.Doc_Id) b WHERE h.Tt_Id IN (500,501,506,507) AND r.rnd>0 AND r.act=r.act2 AND d.Act_ID=r.act AND x.n=1 AND ABS(d.AMOUNT-r.rnd)<0.005 AND ABS(b.diff)>0.005 AND ABS(ABS(b.diff)-2*r.rnd)<0.006 AND NOT EXISTS (SELECT 1 FROM dbo.ADJUST a WHERE d.SR_NO IN (a.Sr_No, a.Rel_Sr_No))"
+    },
+    {
+        "id":  "LED-UNBALANCED",
+        "area":  "ledger",
+        "title":  "Bills whose ledger does not balance (not explained by round-off)",
+        "severity":  "error",
+        "why":  "Debits and credits differ by more than the round-off effect: an output-tax account or the cash book is misstated. In 3 bills CGST was posted with the full tax and SGST with half (CGST Output overstated, books out by half the tax).",
+        "detectSql":  "SELECT 'Unbalanced by '+CAST(CAST(b.diff AS decimal(12,2)) AS varchar(20))+': '+RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' ('+CONVERT(varchar(10),h.Doc_Date,103)+')' AS Finding, CAST(h.Doc_Id AS bigint) AS Doc_Id FROM dbo.IQDoc_Header h CROSS APPLY (SELECT SUM(CASE z.TYPE WHEN 'D' THEN z.AMOUNT WHEN 'C' THEN -z.AMOUNT ELSE 0 END)      + SUM(CASE z.TYPE WHEN 'R' THEN z.AMOUNT WHEN 'P' THEN -z.AMOUNT ELSE 0 END)      - CASE WHEN h.Mode=0 AND h.Tt_Id IN (204,506,507) THEN h.Bill_Amt WHEN h.Mode=0 AND h.Tt_Id IN (206,500,501) THEN -h.Bill_Amt ELSE 0 END AS diff FROM dbo.IQDayBook z WHERE z.Doc_ID=h.Doc_Id) b OUTER APPLY (SELECT SUM(ABS(c.Amount)) AS rnd, MIN(c.Act_ID) AS act, MAX(c.Act_ID) AS act2 FROM dbo.IQDoc_Chrgs c JOIN dbo.IQCHARGES m ON m.Chrg_Id=c.Chrg_id JOIN dbo.IQCHRG_TYPES t ON t.ChTp_ID=m.Chrg_Type WHERE c.Doc_id=h.Doc_Id AND ISNULL(t.ChTp_Op,0)=0 AND m.Chrg_Name LIKE '%round%' AND c.Amount<>0) r WHERE h.Tt_Id IN (204,205,206,207,208,209,500,501,506,507) AND ABS(b.diff)>0.005 AND ABS(ABS(b.diff)-2*ISNULL(r.rnd,0))>=0.006",
+        "counts":  {
+                       "mbm":  6,
+                       "mp":  0
+                   },
+        "examples":  [
+                         "MBM: Unbalanced by -0.52: CS/323 (22/06/2026)",
+                         "MBM: Unbalanced by 0.19: CS/326 (22/06/2026)",
+                         "MBM: Unbalanced by -16.78: CS/465 (25/07/2026)",
+                         "MBM: Unbalanced by 10.08: CS/476 (30/07/2026)",
+                         "MBM: Unbalanced by -46.53: CS/477 (30/07/2026)"
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "Root cause: these were edited in HQ several times (ModifyCnt 3-17, July-Aug 2026); HQ's edit re-posts the ledger outside one transaction (FrmInwards.AccountPosting_GST deletes on mDataCn autocommit at FrmInwards.cs:38809, inserts row by row, then SaveDaybookActwise_Summary re-nets at :39531), so an interrupted or mis-computed edit leaves a wrong ledger. CS/323 and CS/326 differ from their lines by 0.02-0.05 of tax rounding. Repair: open each bill in HQ and save it unchanged (F10); HQ re-posts from the item grid. Equivalent: MK engine re-post (InvoiceLedger.Plan) in a locked write. Owner question: 'Re-save these 6 bills (Jun-Aug 2026)? The ledger changes only; GST lines and returns stay as filed.'"
+    },
+    {
+        "id":  "LED-NO-LEDGER",
+        "area":  "ledger",
+        "title":  "Bills or vouchers with no ledger rows",
+        "severity":  "error",
+        "why":  "The sale counts in GST/stock but never reached the books: sales account, output GST and cash are understated by the bill amount.",
+        "detectSql":  "SELECT 'No ledger: '+RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' ('+CONVERT(varchar(10),h.Doc_Date,103)+')'+' amount '+CAST(h.Bill_Amt AS varchar(20)) AS Finding, CAST(h.Doc_Id AS bigint) AS Doc_Id FROM dbo.IQDoc_Header h WHERE h.Tt_Id IN (204,205,206,207,208,209,500,501,506,507) AND ISNULL(h.Bill_Amt,0)<>0 AND NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.Doc_ID=h.Doc_Id)",
+        "counts":  {
+                       "mbm":  2,
+                       "mp":  0
+                   },
+        "examples":  [
+                         "MBM: No ledger: CS/76 (25/04/2026) amount 575.00",
+                         "MBM: No ledger: CS/826 (18/10/2026) amount 900.00"
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "Both are cash sales edited in HQ (ModifyCnt 2) with no User_IQ audit rows: HQ's edit deleted the ledger (FrmInwards.cs:38809, autocommit) and the re-post never completed. Repair: open in HQ and save. CS/826 also lost its round-off charge row (lines total 900.20, Bill_Amt 900.00): owner question 'Is CS/826 Rs 900.00 (round-off -0.20) or 900.20?'. CS/76 (Rs 575, 18% item, no round-off) would be posted by HQ as R 43.86 CGST Output, R 43.86 SGST Output, R 487.28 GST Sales 18%, contra Cash."
+    },
+    {
+        "id":  "LED-ORPHAN-ROWS",
+        "area":  "ledger",
+        "title":  "Ledger rows whose document header is missing",
+        "severity":  "error",
+        "why":  "Rows with no IQDoc_Header move account balances but cannot be opened or corrected from any HQ screen.",
+        "detectSql":  "SELECT 'Ledger row '+CAST(d.SR_NO AS varchar(20))+' points at missing document '+CAST(d.Doc_ID AS varchar(20))+' ('+CAST(d.AMOUNT AS varchar(20))+' '+d.TYPE+')' AS Finding, CAST(d.Doc_ID AS bigint) AS Doc_Id, CAST(d.Act_ID AS bigint) AS Act_Id FROM dbo.IQDayBook d WHERE ISNULL(d.Doc_ID,0)<>-1 AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=d.Doc_ID)",
+        "counts":  {
+                       "mbm":  0,
+                       "mp":  0
+                   },
+        "examples":  [
+
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "None today. If any appear (HQ deletes header and ledger in separate autocommit statements), ask whether the document was meant to be deleted; if so delete the rows after releasing their ADJUST links with DeleteBilltoBillAdjustment."
+    },
+    {
+        "id":  "LED-HEADER-MISMATCH",
+        "area":  "ledger",
+        "title":  "Ledger rows disagreeing with their header (date, series, number, party, amount, cash mode)",
+        "severity":  "error",
+        "why":  "Ledger and bill registers would show different dates/numbers/amounts for the same bill; party ledgers would not match the invoice.",
+        "detectSql":  "SELECT 'Row '+CAST(d.SR_NO AS varchar(20))+' of '+RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' ('+CONVERT(varchar(10),h.Doc_Date,103)+')'+' has date/series/number/cash-contra different from the header' AS Finding, CAST(h.Doc_Id AS bigint) AS Doc_Id FROM dbo.IQDayBook d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_ID WHERE d.TRDATE<>h.Doc_Date OR ISNULL(RTRIM(d.Tseries),'')<>ISNULL(RTRIM(h.TSeries),'') OR ISNULL(d.Tno,-1)<>h.TNo OR (d.TYPE IN ('P','R') AND (ISNULL(d.Contra_ID,0)<>6 OR h.Mode<>0)) UNION ALL SELECT 'Party row of '+RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' ('+CONVERT(varchar(10),h.Doc_Date,103)+')'+' does not carry the bill amount' AS Finding, CAST(h.Doc_Id AS bigint) AS Doc_Id FROM dbo.IQDoc_Header h CROSS APPLY (SELECT COUNT(*) AS n, SUM(CASE WHEN d.TYPE IN ('D','P') THEN d.AMOUNT ELSE -d.AMOUNT END) AS amt FROM dbo.IQDayBook d WHERE d.Doc_ID=h.Doc_Id AND d.Act_ID=h.HeadAct_ID) p WHERE h.Tt_Id IN (500,501,506,507) AND h.Mode<>0 AND EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.Doc_ID=h.Doc_Id) AND (p.n<>1 OR ABS(p.amt*CASE WHEN h.Tt_Id IN (500,501) THEN -1 ELSE 1 END - h.Bill_Amt)>0.005) UNION ALL SELECT 'Voucher '+RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' ('+CONVERT(varchar(10),h.Doc_Date,103)+')'+' header row or line total disagrees with the header' AS Finding, CAST(h.Doc_Id AS bigint) AS Doc_Id FROM dbo.IQDoc_Header h CROSS APPLY (SELECT SUM(CASE WHEN d.LnNo=-1 THEN 1 ELSE 0 END) AS hdr, MAX(CASE WHEN d.LnNo=-1 THEN d.Act_ID END) AS hdrAct, SUM(CASE WHEN d.LnNo=-1 THEN d.AMOUNT ELSE 0 END) AS hdrAmt, SUM(CASE WHEN ISNULL(d.LnNo,0)<>-1 THEN d.AMOUNT ELSE 0 END) AS lineAmt FROM dbo.IQDayBook d WHERE d.Doc_ID=h.Doc_Id) v WHERE h.Tt_Id BETWEEN 204 AND 209 AND v.lineAmt IS NOT NULL AND (ABS(v.lineAmt-h.Bill_Amt)>0.005 OR (h.Tt_Id NOT IN (204,206) AND (ISNULL(v.hdr,0)<>1 OR v.hdrAct<>h.Act_ID OR ABS(v.hdrAmt-h.Bill_Amt)>0.005)))",
+        "counts":  {
+                       "mbm":  0,
+                       "mp":  0
+                   },
+        "examples":  [
+
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "None today in either firm (checked: TRDATE=Doc_Date, Tseries/Tno, HeadAct party row = Bill_Amt, voucher header row = Act_ID/Bill_Amt, P/R rows only in cash documents with contra 6). Any future hit: re-save the document in HQ."
+    },
+    {
+        "id":  "LED-CASH-AS-PARTY",
+        "area":  "ledger",
+        "title":  "Card/UPI/credit sales posted to 'Cash on hand'",
+        "severity":  "warning",
+        "why":  "Phone Pe sales whose bank account was chosen as Cash on hand, and credit sales to the Cash account, put money into cash-in-hand that went to the bank (or is owed by a customer). Cash book overstated, bank understated; no customer outstanding is tracked.",
+        "detectSql":  "SELECT 'Mode '+CAST(h.Mode AS varchar(3))+' sale posted to Cash on hand: '+RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' ('+CONVERT(varchar(10),h.Doc_Date,103)+')'+' '+CAST(h.Bill_Amt AS varchar(20)) AS Finding, CAST(h.Doc_Id AS bigint) AS Doc_Id, CAST(6 AS bigint) AS Act_Id FROM dbo.IQDoc_Header h WHERE h.Tt_Id IN (500,501,506,507) AND h.Mode<>0 AND h.HeadAct_ID=6",
+        "counts":  {
+                       "mbm":  8,
+                       "mp":  0
+                   },
+        "examples":  [
+                         "MBM: Mode 4 sale posted to Cash on hand: CS/78 (26/04/2026) 15250.00",
+                         "MBM: Mode 4 sale posted to Cash on hand: CS/376 (07/07/2026) 19900.00",
+                         "MBM: Mode 1 sale posted to Cash on hand: CS/403 (14/07/2026) 138.00",
+                         "MBM: Mode 4 sale posted to Cash on hand: CS/572 (25/08/2026) 4400.00",
+                         "MBM: Mode 1 sale posted to Cash on hand: CS/620 (03/09/2026) 4500.00"
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "HQ does this when the operator picks Cash on hand as the payment account (FrmInwards.SaveDaybookActwise_Summary posts the party row on txtcode.Tag). Owner question per bill: 'Which account received this money (KARUR VYSYABANK 890, PHONE PAY, or a customer)?' Then re-open the bill in HQ, set that account and save. Not auto: the right account is a fact only the shop knows."
+    },
+    {
+        "id":  "ADJ-DEAD",
+        "area":  "ledger",
+        "title":  "Bill-wise links (ADJUST) whose both ledger rows no longer exist",
+        "severity":  "warning",
+        "why":  "Left over from previous years (copied into the new year's database). Invisible in HQ reports, but they make settlement queries unreliable, and in MK Paints 42 of them carry SR_NOs above the current IQDayBook identity (next at 49253): when the ledger numbering reaches them, old settlements would silently attach to new bills and corrupt outstanding.",
+        "detectSql":  "SELECT 'Dead link '+CAST(a.Sr_No AS varchar(20))+' -> '+CAST(a.Rel_Sr_No AS varchar(20))+' amount '+CAST(a.Amount AS varchar(20)) AS Finding FROM dbo.ADJUST a WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.SR_NO=a.Sr_No) AND NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.SR_NO=a.Rel_Sr_No)",
+        "counts":  {
+                       "mbm":  759,
+                       "mp":  85
+                   },
+        "examples":  [
+                         "MBM: Dead link 55695 -> 52262 amount 5000.00",
+                         "MBM: Dead link 49372 -> 49253 amount 202.00",
+                         "MBM: Dead link 49373 -> 49253 amount 100.00",
+                         "MBM: Dead link 49374 -> 49253 amount 100.00",
+                         "MBM: Dead link 49542 -> 49496 amount 1600.00",
+                         "MP: Dead link 55559 -> 50765 amount 100.00",
+                         "MP: Dead link 49372 -> 49253 amount 202.00",
+                         "MP: Dead link 49373 -> 49253 amount 100.00",
+                         "MP: Dead link 49374 -> 49253 amount 100.00",
+                         "MP: Dead link 49542 -> 49496 amount 1600.00"
+                     ],
+        "fix":  "auto",
+        "fixSql":  "DELETE a FROM dbo.ADJUST a WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.SR_NO=a.Sr_No) AND NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.SR_NO=a.Rel_Sr_No);",
+        "fixNotes":  "Equivalent to HQ's DeleteBilltoBillAdjustment for these links: its counter updates hit no rows (both rows are gone) and it deletes the link. No IQDayBook row, balance or HQ report changes. Keep a copy of the deleted rows in the MK write journal (not in HQ's 'adjusted' table, which HQ's bill-wise dialog reads). Test (rolled back): mbm before=759 rowsAffected=759 after=0 blViolationsAfter=0; mp before=85 rowsAffected=85 after=0 blViolationsAfter=0."
+    },
+    {
+        "id":  "ADJ-HALF",
+        "area":  "ledger",
+        "title":  "Payments settled against an opening-balance row that was later re-created",
+        "severity":  "error",
+        "why":  "The payment row still counts the amount as allocated (BL_adjusted) but its target row is gone, so the payment is neither open nor attached to anything. Meanwhile the re-created opening row shows as open and was in several cases settled again by later payments: bill-wise outstanding and ageing for these 13 parties are wrong.",
+        "detectSql":  "SELECT 'Link '+CAST(a.Sr_No AS varchar(20))+' -> '+CAST(a.Rel_Sr_No AS varchar(20))+' ('+CAST(a.Amount AS varchar(20))+'): '+CASE WHEN s.SR_NO IS NULL THEN 'source' ELSE 'target' END+' row missing; live side '+ISNULL(RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12)),'opening')+' account '+CAST(l.Act_ID AS varchar(12)) AS Finding, CAST(l.Doc_ID AS bigint) AS Doc_Id, CAST(l.Act_ID AS bigint) AS Act_Id FROM dbo.ADJUST a LEFT JOIN dbo.IQDayBook s ON s.SR_NO=a.Sr_No LEFT JOIN dbo.IQDayBook r ON r.SR_NO=a.Rel_Sr_No JOIN dbo.IQDayBook l ON l.SR_NO=ISNULL(s.SR_NO,r.SR_NO) LEFT JOIN dbo.IQDoc_Header h ON h.Doc_Id=l.Doc_ID WHERE (s.SR_NO IS NULL AND r.SR_NO IS NOT NULL) OR (s.SR_NO IS NOT NULL AND r.SR_NO IS NULL)",
+        "counts":  {
+                       "mbm":  19,
+                       "mp":  0
+                   },
+        "examples":  [
+                         "MBM: Link 67565 -> 66946 (20000.00): target row missing; live side BP/1 account 10089",
+                         "MBM: Link 67567 -> 66982 (26836.00): target row missing; live side BP/2 account 10090",
+                         "MBM: Link 68619 -> 66869 (8469.00): target row missing; live side BRC/3 account 10457",
+                         "MBM: Link 67571 -> 67003 (12043.00): target row missing; live side BP/4 account 10227",
+                         "MBM: Link 68621 -> 66899 (797.64): target row missing; live side BRC/4 account 10117"
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "Root cause: on 8 Jun 2026 10:50 HQ's 'update opening balances from previous year' (FrmNewFy.cs:846-847 'Delete From IQDaybook Where doc_id=-1', then ClsNewFY re-inserts, ClsNewFY.cs:1437 for bill-wise accounts) deleted and re-inserted all 206 opening rows without touching ADJUST; accounts 10636/10970/10695 were re-created again on 11 Oct / 2 Nov the same way. HQ never repairs this. Two options, owner decides per party: (a) release (prepared SQL above, tested: clears all, BL check stays clean) = DeleteBilltoBillAdjustment semantics on the surviving row, the payment becomes on-account and is re-allocated in HQ's bill-wise screen; (b) re-point the link to the account's current opening row (HQ's own precedent: FrmInwards.cs:37823 'Update Adjust set Rel_SR_NO=new where Rel_SR_NO=old') - only possible where that row still has room (accounts 11059, 10209, 10218, 10695). Question: 'For SAAI KUMAR VALVES (4 payments, Rs 1,33,338) and SURYA AGENIES (BP/2 and BP/61 both settle the Rs 26,836 opening) etc., which bills did these payments really pay?'. Do not run while an HQ user is editing a bill: HQ's own edit passes through this state transiently. Prepared repair (owner approval required, tested rolled back: mbm before=19 rowsAffected=797 after=0 blViolationsAfter=0; mp before=0 rowsAffected=85 after=0 blViolationsAfter=0): UPDATE d SET d.BL_adjusted = ISNULL(d.BL_adjusted,0) - x.amt FROM dbo.IQDayBook d JOIN ( SELECT a.Sr_No AS sr, SUM(a.Amount) AS amt FROM dbo.ADJUST a WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDayBook t WHERE t.SR_NO=a.Rel_Sr_No) GROUP BY a.Sr_No UNION ALL SELECT a.Rel_Sr_No, SUM(a.Amount) FROM dbo.ADJUST a WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDayBook t WHERE t.SR_NO=a.Sr_No) GROUP BY a.Rel_Sr_No) x ON x.sr=d.SR_NO; DELETE a FROM dbo.ADJUST a WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDayBook t WHERE t.SR_NO=a.Sr_No) OR NOT EXISTS (SELECT 1 FROM dbo.IQDayBook t WHERE t.SR_NO=a.Rel_Sr_No);"
+    },
+    {
+        "id":  "ADJ-BAD-LINK",
+        "area":  "ledger",
+        "title":  "Bill-wise links that are duplicated, self-referencing, non-positive, cross-account or same-side",
+        "severity":  "error",
+        "why":  "A link must join a debit and a credit of the same account; anything else corrupts outstanding and the BL_adjusted counters.",
+        "detectSql":  "SELECT 'Bad link '+CAST(a.Sr_No AS varchar(20))+' -> '+CAST(a.Rel_Sr_No AS varchar(20))+' amount '+CAST(a.Amount AS varchar(20)) AS Finding, CAST(s.Doc_ID AS bigint) AS Doc_Id, CAST(s.Act_ID AS bigint) AS Act_Id FROM dbo.ADJUST a JOIN dbo.IQDayBook s ON s.SR_NO=a.Sr_No JOIN dbo.IQDayBook r ON r.SR_NO=a.Rel_Sr_No WHERE ISNULL(a.Amount,0)<=0 OR a.Sr_No=a.Rel_Sr_No OR s.Act_ID<>r.Act_ID OR (s.TYPE IN ('D','P') AND r.TYPE IN ('D','P')) OR (s.TYPE IN ('C','R') AND r.TYPE IN ('C','R')) OR (s.Doc_ID=r.Doc_ID AND s.Doc_ID<>-1) UNION ALL SELECT 'Duplicate link '+CAST(g.Sr_No AS varchar(20))+' -> '+CAST(g.Rel_Sr_No AS varchar(20))+' x'+CAST(g.c AS varchar(5)) AS Finding, NULL AS Doc_Id, NULL AS Act_Id FROM (SELECT Sr_No, Rel_Sr_No, COUNT(*) AS c FROM dbo.ADJUST GROUP BY Sr_No, Rel_Sr_No HAVING COUNT(*)>1) g",
+        "counts":  {
+                       "mbm":  0,
+                       "mp":  0
+                   },
+        "examples":  [
+
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "None today. FrmBill2BillAdj only offers same-account, opposite-side open items, so a hit would mean an external write. Repair would be DeleteBilltoBillAdjustment on the source row and re-allocation in HQ."
+    },
+    {
+        "id":  "BL-COUNTER",
+        "area":  "ledger",
+        "title":  "BL_adjusted differs from the sum of its ADJUST links",
+        "severity":  "error",
+        "why":  "HQ's outstanding and bill-wise screens use AMOUNT-BL_adjusted to decide what is open; a wrong counter shows paid bills as due (or the reverse).",
+        "detectSql":  "SELECT 'Row '+CAST(d.SR_NO AS varchar(20))+' BL_adjusted '+CAST(ISNULL(d.BL_adjusted,0) AS varchar(20))+' but links total '+CAST(ISNULL(l.s,0) AS varchar(20)) AS Finding, CAST(d.Doc_ID AS bigint) AS Doc_Id, CAST(d.Act_ID AS bigint) AS Act_Id FROM dbo.IQDayBook d OUTER APPLY (SELECT SUM(a.Amount) AS s FROM dbo.ADJUST a WHERE a.Sr_No=d.SR_NO OR a.Rel_Sr_No=d.SR_NO) l WHERE ABS(ISNULL(d.BL_adjusted,0)-ISNULL(l.s,0))>0.005",
+        "counts":  {
+                       "mbm":  0,
+                       "mp":  0
+                   },
+        "examples":  [
+
+                     ],
+        "fix":  "auto",
+        "fixSql":  "UPDATE d SET d.BL_adjusted = ISNULL(l.s,0) FROM dbo.IQDayBook d OUTER APPLY (SELECT SUM(a.Amount) AS s FROM dbo.ADJUST a WHERE a.Sr_No=d.SR_NO OR a.Rel_Sr_No=d.SR_NO) l WHERE ABS(ISNULL(d.BL_adjusted,0)-ISNULL(l.s,0))>0.005;",
+        "fixNotes":  "None today (269 settled rows in MBM all reconcile, including rows whose partner is missing). The invariant is the one HQ maintains: every ADJUST insert adds its amount to both rows and DeleteBilltoBillAdjustment subtracts it from both (spec hq-spec-voucher-modify.md 3-4). Recomputing restores exactly that state. Run only after ADJ-HALF is decided, and not during an HQ edit (HQ's edit releases and re-applies in separate autocommit steps). Test (rolled back): mbm before=1 (seeded corruption) rowsAffected=1 after=0 blViolationsAfter=0; mp before=1 (seeded corruption) rowsAffected=1 after=0 blViolationsAfter=0."
+    },
+    {
+        "id":  "BL-RANGE",
+        "area":  "ledger",
+        "title":  "BL_adjusted negative or larger than the row amount",
+        "severity":  "error",
+        "why":  "An over-allocated row means more was settled than billed; a negative counter means a release ran twice. Outstanding would show negative dues.",
+        "detectSql":  "SELECT 'Row '+CAST(d.SR_NO AS varchar(20))+' amount '+CAST(d.AMOUNT AS varchar(20))+' BL_adjusted '+CAST(d.BL_adjusted AS varchar(20)) AS Finding, CAST(d.Doc_ID AS bigint) AS Doc_Id, CAST(d.Act_ID AS bigint) AS Act_Id FROM dbo.IQDayBook d WHERE d.BL_adjusted<-0.005 OR d.BL_adjusted>d.AMOUNT+0.005",
+        "counts":  {
+                       "mbm":  0,
+                       "mp":  0
+                   },
+        "examples":  [
+
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "None today. HQ's only guard is in the dialog (FrmBill2BillAdj.cs:957); a bill edited down below what was settled could produce this. Question: 'Which settlement should be reduced?'"
+    },
+    {
+        "id":  "ADJ-BACKUP-STALE",
+        "area":  "ledger",
+        "title":  "Stale previous-year rows in HQ's 'adjusted' backup table",
+        "severity":  "info",
+        "why":  "HQ backs up links into 'adjusted' while a voucher or bill is being edited and offers them again in the bill-wise dialog. Rows from previous years can never be matched (their SR_NOs are below this year's first ledger row) and only add noise.",
+        "detectSql":  "SELECT 'Stale backup '+CAST(x.Sr_No AS varchar(20))+' -> '+CAST(x.Rel_Sr_No AS varchar(20))+' amount '+CAST(x.Amount AS varchar(20)) AS Finding FROM dbo.adjusted x WHERE x.Sr_No < (SELECT MIN(SR_NO) FROM dbo.IQDayBook) AND NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.SR_NO=x.Sr_No)",
+        "counts":  {
+                       "mbm":  16,
+                       "mp":  6
+                   },
+        "examples":  [
+                         "MBM: Stale backup 560 -> 501 amount 100.00",
+                         "MBM: Stale backup 1477 -> 955 amount 23.00",
+                         "MBM: Stale backup 1475 -> 955 amount 100.00",
+                         "MBM: Stale backup 1479 -> 955 amount 23.00",
+                         "MBM: Stale backup 1481 -> 955 amount 100.00",
+                         "MP: Stale backup 560 -> 501 amount 100.00",
+                         "MP: Stale backup 1477 -> 955 amount 23.00",
+                         "MP: Stale backup 1475 -> 955 amount 100.00",
+                         "MP: Stale backup 1479 -> 955 amount 23.00",
+                         "MP: Stale backup 1481 -> 955 amount 100.00"
+                     ],
+        "fix":  "auto",
+        "fixSql":  "DELETE x FROM dbo.adjusted x WHERE x.Sr_No < (SELECT MIN(SR_NO) FROM dbo.IQDayBook) AND NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.SR_NO=x.Sr_No);",
+        "fixNotes":  "Leaves the table as HQ's successful save path does (empty). Restricted to SR_NOs below this year's first ledger row on purpose: a backup whose row was just deleted by an HQ edit in progress (FrmFin_Vouchers step A / FrmInwards.cs:37785) also has a missing SR_NO and must not be touched. Test (rolled back): mbm before=16 rowsAffected=16 after=0 blViolationsAfter=0; mp before=6 rowsAffected=6 after=0 blViolationsAfter=0."
+    },
+    {
+        "id":  "OPEN-MASTER-NOROW",
+        "area":  "ledger",
+        "title":  "Account master shows an opening balance but no opening ledger row exists",
+        "severity":  "warning",
+        "why":  "HQ's ledgers and trial balance read opening balances only from IQDayBook Doc_ID=-1 rows and never from IQAccmst.Act_OPbal, so HQ shows these accounts as zero while MK's reports (ReportService.Opening counts the master figure when no row exists) show the master amount. The two systems disagree by these amounts.",
+        "detectSql":  "SELECT 'Master opening '+CAST(a.Act_OPbal AS varchar(20))+' '+ISNULL(a.Act_OpSign,'')+' without ledger row: '+LTRIM(RTRIM(a.Act_Name)) AS Finding, CAST(a.Act_Id AS bigint) AS Act_Id FROM dbo.IQAccmst a WHERE a.Act_Cat='A' AND ISNULL(a.Act_OPbal,0)<>0 AND NOT EXISTS (SELECT 1 FROM dbo.IQDayBook o WHERE o.Act_ID=a.Act_Id AND o.Doc_ID=-1)",
+        "counts":  {
+                       "mbm":  4,
+                       "mp":  0
+                   },
+        "examples":  [
+                         "MBM: Master opening 49143.00 C without ledger row: MODERAN ELECTRIAL CENTER",
+                         "MBM: Master opening 52000.00 C without ledger row: Shri srinivasa polymers",
+                         "MBM: Master opening 49200.00 C without ledger row: HIRANYAMAYI PLASTICS-2018-2019-2020",
+                         "MBM: Master opening 49200.00 D without ledger row: Hiranyamayi plastics"
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "Opening the account in HQ and saving it loads the opening from the (absent) rows and writes Act_OPbal=0 plus a zero opening row (FrmAccounts.Save_Daybook, FrmAccounts.cs:10787) - HQ would erase the master figure. Owner question: 'Do MODERAN ELECTRIAL CENTER, Shri srinivasa polymers and the two HIRANYAMAYI PLASTICS accounts (49,200 Cr and 49,200 Dr - they cancel) really have these opening balances?' If no: re-save in HQ. If yes: enter the opening in HQ. Separately, MK's ReportService.Opening should ignore Act_OPbal to match HQ."
+    },
+    {
+        "id":  "OPEN-MASTER-DIFF",
+        "area":  "ledger",
+        "title":  "Opening ledger rows that disagree with the account master",
+        "severity":  "info",
+        "why":  "Only account 8 'Profit & Loss - Previous Year': HQ's new-year routine inserts one opening row for the carried P&L balance and another for last year's profit, but the master keeps only the last figure. HQ reports use the rows, so nothing is wrong in HQ.",
+        "detectSql":  "SELECT 'Opening rows '+CAST(o.net AS varchar(20))+' vs master '+CAST(CASE WHEN a.Act_OpSign='C' THEN -1 ELSE 1 END*ISNULL(a.Act_OPbal,0) AS varchar(20))+' ('+CAST(o.n AS varchar(5))+' rows): '+LTRIM(RTRIM(a.Act_Name)) AS Finding, CAST(a.Act_Id AS bigint) AS Act_Id FROM dbo.IQAccmst a JOIN (SELECT Act_ID, COUNT(*) AS n, SUM(CASE WHEN TYPE IN ('D','d') THEN AMOUNT ELSE -AMOUNT END) AS net FROM dbo.IQDayBook WHERE Doc_ID=-1 GROUP BY Act_ID) o ON o.Act_ID=a.Act_Id WHERE a.Act_Id<>5 AND (o.n>1 OR ABS(o.net - CASE WHEN a.Act_OpSign='C' THEN -1 ELSE 1 END*ISNULL(a.Act_OPbal,0))>0.005)",
+        "counts":  {
+                       "mbm":  1,
+                       "mp":  1
+                   },
+        "examples":  [
+                         "MBM: Opening rows -3205835.89 vs master -1185345.79 (2 rows): Profit & Loss - Previous Year",
+                         "MP: Opening rows -1590700.35 vs master -312069.38 (2 rows): Profit & Loss - Previous Year"
+                     ],
+        "fix":  "report",
+        "fixSql":  null,
+        "fixNotes":  "ClsNewFY.cs:390-412 writes the P&L rows and overwrites Act_OPbal of account 8. Leave as is; MK code must sum the rows (never use Act_OPbal when rows exist) - the current ReportService rule already does."
+    },
+    {
+        "id":  "OPEN-DIFF-ACCOUNT",
+        "area":  "ledger",
+        "title":  "Account 5 'Opening Balance Difference' out of step with the opening rows",
+        "severity":  "error",
+        "why":  "HQ keeps account 5 equal to the net of all other opening rows on every account save (FrmAccounts.UpdateOpeningBalanceDifferenceAccount, FrmAccounts.cs:9746). If it drifts the opening trial balance no longer balances.",
+        "detectSql":  "SELECT 'Account 5 holds '+ISNULL(o.typ,'-')+' '+CAST(ISNULL(o.amt,0) AS varchar(20))+' / master '+ISNULL(m.Act_OpSign,'')+' '+CAST(ISNULL(m.Act_OPbal,0) AS varchar(20))+' but opening rows need '+CASE WHEN n.net>0 THEN 'C' ELSE 'D' END+' '+CAST(ABS(n.net) AS varchar(20)) AS Finding, CAST(5 AS bigint) AS Act_Id FROM (SELECT (SELECT ISNULL(SUM(CASE WHEN d.TYPE IN ('D','d') THEN d.AMOUNT ELSE (-1)*d.AMOUNT END),0) FROM dbo.IQDayBook d INNER JOIN dbo.IQAccMst a ON d.Act_ID=a.Act_ID WHERE d.TYPE IN ('D','d','C','c') AND a.Act_ID<>5 AND d.Doc_ID=-1) AS net) n CROSS JOIN dbo.IQAccmst m OUTER APPLY (SELECT COUNT(*) AS c, MAX(d.TYPE) AS typ, MAX(d.AMOUNT) AS amt, MIN(d.Doc_ID) AS doc FROM dbo.IQDayBook d WHERE d.Act_ID=5) o WHERE m.Act_Id=5 AND (o.c<>1 OR o.doc<>-1 OR ABS(ISNULL(o.amt,0)-ABS(n.net))>0.005 OR ISNULL(o.typ,'')<>CASE WHEN n.net>0 THEN 'C' ELSE 'D' END OR ABS(ISNULL(m.Act_OPbal,0)-ABS(n.net))>0.005 OR ISNULL(m.Act_OpSign,'')<>CASE WHEN n.net>0 THEN 'C' ELSE 'D' END)",
+        "counts":  {
+                       "mbm":  0,
+                       "mp":  0
+                   },
+        "examples":  [
+
+                     ],
+        "fix":  "auto",
+        "fixSql":  "UPDATE dbo.IQAccMst SET Act_Opbal=CAST(ABS((SELECT ISNULL(SUM(CASE WHEN d.TYPE IN ('D','d') THEN d.AMOUNT ELSE (-1)*d.AMOUNT END),0) FROM dbo.IQDayBook d INNER JOIN dbo.IQAccMst a ON d.Act_ID=a.Act_ID WHERE d.TYPE IN ('D','d','C','c') AND a.Act_ID<>5 AND d.Doc_ID=-1)) AS decimal(18,2)), Act_opSign=CASE WHEN (SELECT ISNULL(SUM(CASE WHEN d.TYPE IN ('D','d') THEN d.AMOUNT ELSE (-1)*d.AMOUNT END),0) FROM dbo.IQDayBook d INNER JOIN dbo.IQAccMst a ON d.Act_ID=a.Act_ID WHERE d.TYPE IN ('D','d','C','c') AND a.Act_ID<>5 AND d.Doc_ID=-1) > 0 THEN 'C' ELSE 'D' END WHERE Act_Id=5; UPDATE dbo.IQDayBook SET AMOUNT=CAST(ABS((SELECT ISNULL(SUM(CASE WHEN d.TYPE IN ('D','d') THEN d.AMOUNT ELSE (-1)*d.AMOUNT END),0) FROM dbo.IQDayBook d INNER JOIN dbo.IQAccMst a ON d.Act_ID=a.Act_ID WHERE d.TYPE IN ('D','d','C','c') AND a.Act_ID<>5 AND d.Doc_ID=-1)) AS decimal(18,2)), TYPE=CASE WHEN (SELECT ISNULL(SUM(CASE WHEN d.TYPE IN ('D','d') THEN d.AMOUNT ELSE (-1)*d.AMOUNT END),0) FROM dbo.IQDayBook d INNER JOIN dbo.IQAccMst a ON d.Act_ID=a.Act_ID WHERE d.TYPE IN ('D','d','C','c') AND a.Act_ID<>5 AND d.Doc_ID=-1) > 0 THEN 'C' ELSE 'D' END WHERE Act_ID=5 AND Doc_ID=-1 AND (SELECT COUNT(*) FROM dbo.IQDayBook z WHERE z.Act_ID=5)=1;",
+        "fixNotes":  "Clean in both firms. The repair writes the same amount and side HQ computes; HQ itself deletes and re-inserts the account-5 row (new SR_NO, Ent_Date) - the in-place update differs only in that identity, which nothing references. If account 5 has 0 or several rows the update is skipped: then re-save any account in HQ. Test (rolled back): mbm before=1 (seeded corruption) rowsAffected=2 after=0 blViolationsAfter=0; mp before=1 (seeded corruption) rowsAffected=2 after=0 blViolationsAfter=0."
+    },
+    {
+        "id":  "OPEN-TB-DIFFERENCE",
+        "area":  "ledger",
+        "title":  "Opening trial balance does not balance (difference parked in account 5)",
+        "severity":  "info",
+        "why":  "The previous-year closing balances carried in do not net to zero; HQ parks the difference in 'Opening Balance Difference'. The balance sheet carries an unexplained amount (MBM Rs 21.8 lakh Cr, MP Rs 7.5 lakh Dr).",
+        "detectSql":  "SELECT 'Opening difference '+d.TYPE+' '+CAST(d.AMOUNT AS varchar(20)) AS Finding, CAST(5 AS bigint) AS Act_Id FROM dbo.IQDayBook d WHERE d.Act_ID=5 AND d.Doc_ID=-1 AND ABS(d.AMOUNT)>0.005",
+        "counts":  {
+                       "mbm":  1,
+                       "mp":  1
+                   },
+        "examples":  [
+                         "MBM: Opening difference C 2183415.60",
+                         "MP: Opening difference D 752507.84"
+                     ],
+        "fix":  "report",
+        "fixSql":  null,
+        "fixNotes":  "An accounting question for the accountant (previous-year books), not a data repair. Not to be changed by MK."
+    },
+    {
+        "id":  "CASH-NEGATIVE",
+        "area":  "ledger",
+        "title":  "Days with negative cash in hand",
+        "severity":  "warning",
+        "why":  "Cash cannot go below zero; a negative running balance means a cash receipt is missing or a payment is wrongly in cash.",
+        "detectSql":  "SELECT 'Cash in hand '+CAST(CAST(b.bal AS decimal(19,2)) AS varchar(30))+' on '+CONVERT(varchar(10),b.TRDATE,103) AS Finding, CAST(6 AS bigint) AS Act_Id FROM (SELECT c.TRDATE, SUM(c.mv) OVER (ORDER BY c.TRDATE ROWS UNBOUNDED PRECEDING) AS bal FROM (SELECT d.TRDATE, SUM(CASE WHEN d.Act_ID=6 THEN CASE WHEN d.TYPE IN ('D','P') THEN d.AMOUNT ELSE -d.AMOUNT END ELSE CASE WHEN d.TYPE='R' THEN d.AMOUNT WHEN d.TYPE='P' THEN -d.AMOUNT ELSE 0 END END) AS mv FROM dbo.IQDayBook d WHERE d.Act_ID=6 OR (d.Contra_ID=6 AND d.Act_ID<>6 AND d.TYPE IN ('P','R')) GROUP BY d.TRDATE) c) b WHERE b.bal < -0.005",
+        "counts":  {
+                       "mbm":  0,
+                       "mp":  0
+                   },
+        "examples":  [
+
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "None in either firm (cash never goes negative; see CASH-BANK-RECON for the opposite problem). Cash = account 6 rows plus P/R rows whose implicit contra is cash, as ReportService does."
+    },
+    {
+        "id":  "CASH-BANK-RECON",
+        "area":  "ledger",
+        "title":  "Cash and bank books not reconciled (no contra entries)",
+        "severity":  "info",
+        "why":  "Cash in hand keeps growing (MBM Rs 1.72 crore, MP Rs 92 lakh) while the main bank account is overdrawn in the books (MBM KVB 890 -Rs 1.12 crore, MP KVB -Rs 3.98 lakh). No cash-deposit/withdrawal (contra) voucher exists this year, so cash banked is never moved out of cash.",
+        "detectSql":  "SELECT 'Bank account overdrawn in books: '+LTRIM(RTRIM(a.Act_Name))+' '+CAST(b.bal AS varchar(30)) AS Finding, CAST(a.Act_Id AS bigint) AS Act_Id FROM dbo.IQAccmst a JOIN (SELECT d.Act_ID, SUM(CASE WHEN d.TYPE IN ('D','P') THEN d.AMOUNT ELSE -d.AMOUNT END) AS bal FROM dbo.IQDayBook d GROUP BY d.Act_ID) b ON b.Act_ID=a.Act_Id WHERE a.Act_Type='Bank' AND b.bal < -0.005 UNION ALL SELECT 'No cash/bank contra voucher this year; cash in hand '+CAST(c.bal AS varchar(30)) AS Finding, CAST(6 AS bigint) AS Act_Id FROM (SELECT SUM(CASE WHEN d.Act_ID=6 THEN CASE WHEN d.TYPE IN ('D','P') THEN d.AMOUNT ELSE -d.AMOUNT END ELSE CASE WHEN d.TYPE='R' THEN d.AMOUNT WHEN d.TYPE='P' THEN -d.AMOUNT ELSE 0 END END) AS bal FROM dbo.IQDayBook d WHERE d.Act_ID=6 OR (d.Contra_ID=6 AND d.Act_ID<>6 AND d.TYPE IN ('P','R'))) c WHERE c.bal > 0 AND NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_ID JOIN dbo.IQAccmst x ON x.Act_Id=d.Act_ID WHERE h.Tt_Id BETWEEN 204 AND 207 AND x.Act_Type IN ('Cash','Bank') AND ISNULL(d.LnNo,0)<>-1)",
+        "counts":  {
+                       "mbm":  2,
+                       "mp":  2
+                   },
+        "examples":  [
+                         "MBM: Bank account overdrawn in books: KARUR VYSYABANK 890 -11203205.36",
+                         "MBM: No cash/bank contra voucher this year; cash in hand 17199925.36",
+                         "MP: Bank account overdrawn in books: THE KARUR YSYABANK -398427.25",
+                         "MP: No cash/bank contra voucher this year; cash in hand 9206364.83"
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "Owner question: 'Are cash deposits into the bank (and withdrawals) entered anywhere? Should we start recording them as contra vouchers, and will the accountant reconcile the bank book with the statement?' Nothing to repair automatically."
+    },
+    {
+        "id":  "MK-CORE-CHARGE",
+        "area":  "ledger",
+        "title":  "Charge master created by the MK prototype in use on HQ bills",
+        "severity":  "info",
+        "why":  "'MK Core Round purchase f0e57d9e' (type Add) was created by the old TypeScript prototype and sits in HQ's purchase charge set; HQ operators now use it as the purchase round-off. It posts correctly (Add rule), but it is a machine-named master in live data.",
+        "detectSql":  "SELECT 'Charge '+RTRIM(c.Chrg_Name)+' ('+CAST(c.Chrg_Id AS varchar(6))+') used on '+CAST(COUNT(*) AS varchar(10))+' bills' AS Finding FROM dbo.IQCHARGES c JOIN dbo.IQDoc_Chrgs dc ON dc.Chrg_id=c.Chrg_Id WHERE c.Chrg_Name LIKE 'MK Core%' GROUP BY c.Chrg_Id, c.Chrg_Name",
+        "counts":  {
+                       "mbm":  1,
+                       "mp":  1
+                   },
+        "examples":  [
+                         "MBM: Charge MK Core Round purchase f0e57d9e (136) used on 37 bills",
+                         "MP: Charge MK Core Round purchase f0e57d9e (131) used on 1 bills"
+                     ],
+        "fix":  "report",
+        "fixSql":  null,
+        "fixNotes":  "Do not delete (bills reference it). Owner may rename it to 'Round Off (Purchase)' in HQ. Recorded so MK's parity logic knows it is a legitimate Add-type round-off."
+    },
+    {
+        "id":  "NO-SUPPLIER-PAYMENTS",
+        "area":  "ledger",
+        "title":  "Credit purchases recorded but no payment vouchers this year",
+        "severity":  "info",
+        "why":  "MK Paints has 59 credit purchases (Rs 6.0 lakh) and no payment voucher at all in FY 2026-27, so every supplier balance only grows; payables are overstated unless payments are entered.",
+        "detectSql":  "SELECT 'Credit purchases '+CAST(p.amt AS varchar(20))+' in '+CAST(p.n AS varchar(10))+' bills but no payment vouchers' AS Finding FROM (SELECT COUNT(*) AS n, SUM(h.Bill_Amt) AS amt FROM dbo.IQDoc_Header h WHERE h.Tt_Id IN (500,501) AND h.Mode=1) p WHERE p.n>0 AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header v WHERE v.Tt_Id IN (206,207))",
+        "counts":  {
+                       "mbm":  0,
+                       "mp":  1
+                   },
+        "examples":  [
+                         "MP: Credit purchases 601351.00 in 59 bills but no payment vouchers"
+                     ],
+        "fix":  "owner",
+        "fixSql":  null,
+        "fixNotes":  "Owner question: 'Are MK Paints supplier payments made from another firm's account or simply not entered?'"
+    }
+]

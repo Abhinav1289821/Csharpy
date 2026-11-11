@@ -1,0 +1,414 @@
+[
+  {
+    "id": "CFG-01",
+    "area": "config",
+    "title": "Round-off charge is configured as 'Less' (posts every rounded bill on the wrong side)",
+    "severity": "high",
+    "why": "HQ treats the last charge of a rounding transaction type's charge set as the round-off row and writes the signed difference into it (FrmInwards.cs:35228-35243). Posting then uses the charge type's Add/Less flag (FrmInwards.cs:39340-39456): an 'Add' charge posts +v as debit on purchases and credit on sales (correct), a 'Less' charge does the opposite. The party/cash side always gets the rounded bill amount, so with 'Less' each rounded bill's ledger is off by 2 x round-off and the Round off account accumulates the wrong sign. HQ's own 'RoundOff' charge type (9) is also ChTp_Op=0, so it must not be used either; type 5 'Add' is what MP's Round Off uses.",
+    "detectSql": "SELECT 'Charge '+CAST(c.Chrg_Id AS varchar(10))+' '+RTRIM(c.Chrg_Name)+' is the round-off row of a rounding charge set but its charge type '+RTRIM(t.Chtp_Name)+' is a Less type (ChTp_Op=0)' Finding, c.Chrg_Id, c.Act_ID Act_Id\nFROM IQCHARGES c JOIN IQCHRG_TYPES t ON t.ChTp_ID=c.Chrg_Type\nWHERE ISNULL(t.ChTp_Op,0)=0 AND c.Chrg_Id IN (SELECT DISTINCT cs.chrg_Id FROM IQCHRGSETS cs JOIN IQCHRGSETMST m ON m.Set_no=cs.Set_No JOIN TTypes tt ON tt.vousetno=cs.Set_No AND ISNULL(tt.RoundedOffTo,0)>0\nWHERE cs.Grd_Indx=(SELECT MAX(y.Grd_Indx) FROM IQCHRGSETS y WHERE y.Set_No=cs.Set_No))",
+    "counts": {
+      "mbm": 1,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Charge 73 Round Off is the round-off row of a rounding charge set but its charge type Less is a Less type (ChTp_Op=0) | 73 | 11134"
+    ],
+    "fix": "auto",
+    "fixSql": "UPDATE c SET Chrg_Type=5, IsPFChrg=ISNULL(c.IsPFChrg,0), Ent_Date=CAST(CAST(GETDATE() AS date) AS datetime), Ent_Uid=1\nFROM IQCHARGES c JOIN IQCHRG_TYPES t ON t.ChTp_ID=c.Chrg_Type\nWHERE ISNULL(t.ChTp_Op,0)=0 AND c.Chrg_Id IN (SELECT DISTINCT cs.chrg_Id FROM IQCHRGSETS cs JOIN IQCHRGSETMST m ON m.Set_no=cs.Set_No JOIN TTypes tt ON tt.vousetno=cs.Set_No AND ISNULL(tt.RoundedOffTo,0)>0\nWHERE cs.Grd_Indx=(SELECT MAX(y.Grd_Indx) FROM IQCHRGSETS y WHERE y.Set_No=cs.Set_No))",
+    "fixNotes": "Same row HQ's charge master writes when the operator changes 'Charge Type' to Add and saves (frmCharges.cs:1477 -> IQCHARGES_insert UPDATE branch: all columns re-sent unchanged, Ent_Date=today, Ent_Uid=user, IsPFChrg from checkbox). FUTURE bills only: already-posted bills keep the wrong side until re-posted (CFG-02/CFG-03). Side effect to know: an old bill re-opened and re-saved in HQ after this change is re-posted with the Add rule, i.e. corrected. mk-hq's engine reads ChTp_Op live (FirmProfile.cs ChargeRow.IsAdd), so parity holds automatically; update the hq-ledger-quirks note afterwards. Verified in a rolled-back transaction on MKHQ_AUDIT_MBM/MP: detect count 1/0 -> 0/0 after fixSql."
+  },
+  {
+    "id": "CFG-02",
+    "area": "config",
+    "title": "Bills from 1 Oct 2026 with round-off posted on the wrong side",
+    "severity": "high",
+    "why": "Consequence of CFG-01 on bills not yet covered by filed GST returns. Each bill's IQDayBook is unbalanced by 2 x round-off and the Round off account is misstated. Round-off does not enter taxable value or tax, so GST returns are unaffected either way.",
+    "detectSql": "SELECT f.Finding, f.Doc_Id, f.Act_Id FROM (SELECT 'Bill '+RTRIM(ro.TSeries)+'/'+CAST(ro.TNo AS varchar(12))+' of '+CONVERT(varchar(10),ro.Doc_Date,103)+': round-off '+CAST(CAST(ro.Amount AS decimal(9,2)) AS varchar(12))+' posted on the wrong side of account '+CAST(ro.Act_ID AS varchar(12))+' (ledger off by '+CAST(CAST(2*ABS(ro.Amount) AS decimal(9,2)) AS varchar(12))+')' Finding,\n  ro.Doc_Id, ro.Act_ID Act_Id, ro.Doc_Date\nFROM (SELECT h.Doc_Id, h.Doc_Date, h.TSeries, h.TNo, tt.Vouchtype, dc.Chrg_id, dc.Act_ID, dc.Amount,\n  CASE WHEN tt.Vouchtype='Purchase' THEN dc.Amount ELSE -dc.Amount END correct_dr, p.posted_dr\nFROM IQDoc_Header h JOIN TTypes tt ON tt.TT_ID=h.Tt_Id\nJOIN IQDoc_Chrgs dc ON dc.Doc_id=h.Doc_Id AND dc.CIndx=(SELECT MAX(x.CIndx) FROM IQDoc_Chrgs x WHERE x.Doc_id=h.Doc_Id)\nCROSS APPLY (SELECT SUM(CASE WHEN d.TYPE IN ('D','P') THEN d.AMOUNT ELSE -d.AMOUNT END) posted_dr FROM IQDayBook d WHERE d.Doc_ID=h.Doc_Id AND d.Act_ID=dc.Act_ID) p\nWHERE tt.Vouchtype IN ('Purchase','Sales') AND ISNULL(tt.RoundedOffTo,0)>0 AND dc.Amount<>0) ro WHERE SIGN(ro.posted_dr)=-SIGN(ro.correct_dr) AND ABS(ro.posted_dr)=ABS(ro.Amount)) f WHERE f.Doc_Date>='2026-10-01'",
+    "counts": {
+      "mbm": 54,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Bill CS/836 of 23/10/2026: round-off 0.19 posted on the wrong side of account 11134 (ledger off by 0.38) | 10174 | 11134",
+      "MBM: Bill CS/795 of 13/10/2026: round-off 0.16 posted on the wrong side of account 11134 (ledger off by 0.32) | 10078 | 11134",
+      "MBM: Bill CS/799 of 14/10/2026: round-off -0.18 posted on the wrong side of account 11134 (ledger off by 0.36) | 10095 | 11134"
+    ],
+    "fix": "auto",
+    "fixSql": "UPDATE d SET TYPE=CASE d.TYPE WHEN 'D' THEN 'C' WHEN 'C' THEN 'D' WHEN 'P' THEN 'R' WHEN 'R' THEN 'P' END\nFROM IQDayBook d JOIN (SELECT 'Bill '+RTRIM(ro.TSeries)+'/'+CAST(ro.TNo AS varchar(12))+' of '+CONVERT(varchar(10),ro.Doc_Date,103)+': round-off '+CAST(CAST(ro.Amount AS decimal(9,2)) AS varchar(12))+' posted on the wrong side of account '+CAST(ro.Act_ID AS varchar(12))+' (ledger off by '+CAST(CAST(2*ABS(ro.Amount) AS decimal(9,2)) AS varchar(12))+')' Finding,\n  ro.Doc_Id, ro.Act_ID Act_Id, ro.Doc_Date\nFROM (SELECT h.Doc_Id, h.Doc_Date, h.TSeries, h.TNo, tt.Vouchtype, dc.Chrg_id, dc.Act_ID, dc.Amount,\n  CASE WHEN tt.Vouchtype='Purchase' THEN dc.Amount ELSE -dc.Amount END correct_dr, p.posted_dr\nFROM IQDoc_Header h JOIN TTypes tt ON tt.TT_ID=h.Tt_Id\nJOIN IQDoc_Chrgs dc ON dc.Doc_id=h.Doc_Id AND dc.CIndx=(SELECT MAX(x.CIndx) FROM IQDoc_Chrgs x WHERE x.Doc_id=h.Doc_Id)\nCROSS APPLY (SELECT SUM(CASE WHEN d.TYPE IN ('D','P') THEN d.AMOUNT ELSE -d.AMOUNT END) posted_dr FROM IQDayBook d WHERE d.Doc_ID=h.Doc_Id AND d.Act_ID=dc.Act_ID) p\nWHERE tt.Vouchtype IN ('Purchase','Sales') AND ISNULL(tt.RoundedOffTo,0)>0 AND dc.Amount<>0) ro WHERE SIGN(ro.posted_dr)=-SIGN(ro.correct_dr) AND ABS(ro.posted_dr)=ABS(ro.Amount)) f ON f.Doc_Id=d.Doc_ID AND f.Act_Id=d.Act_ID\nWHERE f.Doc_Date>='2026-10-01'",
+    "fixNotes": "Run only after CFG-01, otherwise a later HQ re-save re-posts the old (wrong) side. Flipping D<->C / P<->R on the bill's round-off row gives exactly the row HQ writes for an 'Add' round-off: same Act_ID, Contra_ID, amount and narration, opposite side (FrmInwards.cs:39354-39378 inward, 39441-39451 outward); HQ nets per (Act_ID,Contra_ID) and only round-off posts to that account, so no other row changes. The Round off ledger balance changes; nothing else (no tax, stock or party amount). Verified in a rolled-back transaction on MKHQ_AUDIT_MBM/MP: detect count 54/0 -> 0/0 after fixSql."
+  },
+  {
+    "id": "CFG-03",
+    "area": "config",
+    "title": "Bills before 1 Oct 2026 with round-off posted on the wrong side",
+    "severity": "high",
+    "why": "Same defect as CFG-02 on bills in periods whose GST returns are likely filed. The correction changes only the Round off ledger (no tax value), but it alters closed-period books.",
+    "detectSql": "SELECT f.Finding, f.Doc_Id, f.Act_Id FROM (SELECT 'Bill '+RTRIM(ro.TSeries)+'/'+CAST(ro.TNo AS varchar(12))+' of '+CONVERT(varchar(10),ro.Doc_Date,103)+': round-off '+CAST(CAST(ro.Amount AS decimal(9,2)) AS varchar(12))+' posted on the wrong side of account '+CAST(ro.Act_ID AS varchar(12))+' (ledger off by '+CAST(CAST(2*ABS(ro.Amount) AS decimal(9,2)) AS varchar(12))+')' Finding,\n  ro.Doc_Id, ro.Act_ID Act_Id, ro.Doc_Date\nFROM (SELECT h.Doc_Id, h.Doc_Date, h.TSeries, h.TNo, tt.Vouchtype, dc.Chrg_id, dc.Act_ID, dc.Amount,\n  CASE WHEN tt.Vouchtype='Purchase' THEN dc.Amount ELSE -dc.Amount END correct_dr, p.posted_dr\nFROM IQDoc_Header h JOIN TTypes tt ON tt.TT_ID=h.Tt_Id\nJOIN IQDoc_Chrgs dc ON dc.Doc_id=h.Doc_Id AND dc.CIndx=(SELECT MAX(x.CIndx) FROM IQDoc_Chrgs x WHERE x.Doc_id=h.Doc_Id)\nCROSS APPLY (SELECT SUM(CASE WHEN d.TYPE IN ('D','P') THEN d.AMOUNT ELSE -d.AMOUNT END) posted_dr FROM IQDayBook d WHERE d.Doc_ID=h.Doc_Id AND d.Act_ID=dc.Act_ID) p\nWHERE tt.Vouchtype IN ('Purchase','Sales') AND ISNULL(tt.RoundedOffTo,0)>0 AND dc.Amount<>0) ro WHERE SIGN(ro.posted_dr)=-SIGN(ro.correct_dr) AND ABS(ro.posted_dr)=ABS(ro.Amount)) f WHERE f.Doc_Date<'2026-10-01'",
+    "counts": {
+      "mbm": 416,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Bill GSTPUR/207 of 24/08/2026: round-off 0.39 posted on the wrong side of account 11134 (ledger off by 0.78) | 9716 | 11134",
+      "MBM: Bill CS/633 of 09/09/2026: round-off -0.39 posted on the wrong side of account 11134 (ledger off by 0.78) | 9745 | 11134",
+      "MBM: Bill GSTPUR/242 of 30/09/2026: round-off -0.08 posted on the wrong side of account 11134 (ledger off by 0.16) | 9933 | 11134"
+    ],
+    "fix": "owner",
+    "fixSql": "UPDATE d SET TYPE=CASE d.TYPE WHEN 'D' THEN 'C' WHEN 'C' THEN 'D' WHEN 'P' THEN 'R' WHEN 'R' THEN 'P' END\nFROM IQDayBook d JOIN (SELECT 'Bill '+RTRIM(ro.TSeries)+'/'+CAST(ro.TNo AS varchar(12))+' of '+CONVERT(varchar(10),ro.Doc_Date,103)+': round-off '+CAST(CAST(ro.Amount AS decimal(9,2)) AS varchar(12))+' posted on the wrong side of account '+CAST(ro.Act_ID AS varchar(12))+' (ledger off by '+CAST(CAST(2*ABS(ro.Amount) AS decimal(9,2)) AS varchar(12))+')' Finding,\n  ro.Doc_Id, ro.Act_ID Act_Id, ro.Doc_Date\nFROM (SELECT h.Doc_Id, h.Doc_Date, h.TSeries, h.TNo, tt.Vouchtype, dc.Chrg_id, dc.Act_ID, dc.Amount,\n  CASE WHEN tt.Vouchtype='Purchase' THEN dc.Amount ELSE -dc.Amount END correct_dr, p.posted_dr\nFROM IQDoc_Header h JOIN TTypes tt ON tt.TT_ID=h.Tt_Id\nJOIN IQDoc_Chrgs dc ON dc.Doc_id=h.Doc_Id AND dc.CIndx=(SELECT MAX(x.CIndx) FROM IQDoc_Chrgs x WHERE x.Doc_id=h.Doc_Id)\nCROSS APPLY (SELECT SUM(CASE WHEN d.TYPE IN ('D','P') THEN d.AMOUNT ELSE -d.AMOUNT END) posted_dr FROM IQDayBook d WHERE d.Doc_ID=h.Doc_Id AND d.Act_ID=dc.Act_ID) p\nWHERE tt.Vouchtype IN ('Purchase','Sales') AND ISNULL(tt.RoundedOffTo,0)>0 AND dc.Amount<>0) ro WHERE SIGN(ro.posted_dr)=-SIGN(ro.correct_dr) AND ABS(ro.posted_dr)=ABS(ro.Amount)) f ON f.Doc_Id=d.Doc_ID AND f.Act_Id=d.Act_ID\nWHERE f.Doc_Date<'2026-10-01'",
+    "fixNotes": "Owner question: 'HQ posted the round-off on 416 bills between 1 Apr and 30 Sep 2026 on the wrong side (books off by Rs 212.76 in total, Round off account misstated by Rs 0.16). GST is not affected. Correct these closed-month ledgers now (flip the round-off line), or leave them and only fix from October?' Same SQL as CFG-02 with the date reversed; run after CFG-01."
+  },
+  {
+    "id": "CFG-04",
+    "area": "config",
+    "title": "Bill ledger rows posted to an account that does not exist",
+    "severity": "high",
+    "why": "A charge pointing at a deleted account still posts (HQ only checks Act_ID>0, FrmInwards.cs:39352/39397). The rows sit in IQDayBook under an id with no IQAccmst row, so they vanish from every ledger, trial balance and P&L while the bill itself is unbalanced in reports. In MP this is the Round Off charge (73 -> 424) on purchase bills.",
+    "detectSql": "SELECT 'Bill '+RTRIM(ISNULL(h.TSeries,d.Tseries))+'/'+CAST(ISNULL(h.TNo,d.Tno) AS varchar(12))+' of '+CONVERT(varchar(10),d.TRDATE,103)+': '+CAST(d.AMOUNT AS varchar(20))+' '+d.TYPE+' posted to missing account '+CAST(d.Act_ID AS varchar(12)) Finding, d.Doc_ID Doc_Id, d.Act_ID Act_Id\nFROM IQDayBook d LEFT JOIN IQDoc_Header h ON h.Doc_Id=d.Doc_ID WHERE NOT EXISTS (SELECT 1 FROM IQAccmst a WHERE a.Act_Id=d.Act_ID)",
+    "counts": {
+      "mbm": 0,
+      "mp": 58
+    },
+    "examples": [
+      "MP: Bill GSTPUR/2 of 16/04/2026: 0.40 D posted to missing account 424 | 2077 | 424",
+      "MP: Bill GSTPUR/4 of 17/04/2026: 0.27 C posted to missing account 424 | 2080 | 424"
+    ],
+    "fix": "owner",
+    "fixSql": "-- after the owner picks @target (MP proposal: 10119 'ROUND OFF', the only round-off account) and CFG-05 has re-pointed the charge\nDECLARE @missing int = 424, @target int = (SELECT TOP 1 Act_Id FROM IQAccmst WHERE Act_Cat='A' AND ISNULL(Act_Usage,0)=0 AND REPLACE(Act_Name,' ','') LIKE 'roundoff%' ORDER BY Act_Id DESC);\nUPDATE IQDayBook SET Act_ID=@target WHERE Act_ID=@missing AND @target IS NOT NULL;\nUPDATE IQDoc_Chrgs SET Act_ID=@target WHERE Act_ID=@missing AND @target IS NOT NULL",
+    "fixNotes": "Owner question (MP): 'Round-off on 58 purchase bills (16 Apr - 22 Oct 2026, net Rs -2.39) was posted to account no. 424, which was deleted. Move those lines to ROUND OFF (10119)?' Most bills are before 1 Oct 2026. The repointing is what HQ itself would write if the charge had the right account and the bill were re-saved (re-save reloads Act_ID from IQDoc_Chrgs, FillCharges_Trans, so IQDoc_Chrgs must be repointed too). User_IQDoc_Chrgs audit copies are history and are left as they are."
+  },
+  {
+    "id": "CFG-05",
+    "area": "config",
+    "title": "Charge in a live charge set points to a missing, group or inactive account",
+    "severity": "high",
+    "why": "Charges of a set referenced by a transaction type appear on every bill of that type; any non-zero value is posted to the charge's Act_ID even if that account does not exist (see CFG-04). Today the amounts are zero except MP Round Off, but one keystroke in the Cash Discount / Adjustment column would post to a phantom account.",
+    "detectSql": "SELECT 'Charge '+CAST(c.Chrg_Id AS varchar(10))+' '+RTRIM(c.Chrg_Name)+' (in set '+sets.list+') posts to account '+CAST(c.Act_ID AS varchar(12))+CASE WHEN a.Act_Id IS NULL THEN ' which does not exist' WHEN a.Act_Cat<>'A' THEN ' which is a group' ELSE ' which is inactive' END Finding, c.Chrg_Id, c.Act_ID Act_Id\nFROM IQCHARGES c LEFT JOIN IQAccmst a ON a.Act_Id=c.Act_ID\nCROSS APPLY (SELECT STRING_AGG(CAST(s.Set_No AS varchar(10)),',') list FROM (SELECT DISTINCT cs.chrg_Id, cs.Set_No FROM IQCHRGSETS cs JOIN IQCHRGSETMST m ON m.Set_no=cs.Set_No WHERE EXISTS (SELECT 1 FROM TTypes tt WHERE tt.vousetno=cs.Set_No)) s WHERE s.chrg_Id=c.Chrg_Id) sets\nWHERE sets.list IS NOT NULL AND (a.Act_Id IS NULL OR a.Act_Cat<>'A' OR ISNULL(a.Act_Usage,0)<>0)",
+    "counts": {
+      "mbm": 4,
+      "mp": 6
+    },
+    "examples": [
+      "MBM: Charge 111 Adjustment (in set 23) posts to account 10009 which does not exist | 111 | 10009",
+      "MBM: Charge 127 Engine Oil (in set 26) posts to account 716 which does not exist | 127 | 716",
+      "MBM: Charge 128 Serviice Tax (in set 26) posts to account 715 which does not exist | 128 | 715",
+      "MP: Charge 73 Round Off (in set 23,24,26) posts to account 424 which does not exist | 73 | 424",
+      "MP: Charge 108 Cash Discount (in set 23) posts to account 613 which does not exist | 108 | 613"
+    ],
+    "fix": "owner",
+    "fixSql": "-- per charge, after the owner chooses the account (@chrg, @act):\nUPDATE IQCHARGES SET Act_ID=@act, IsPFChrg=ISNULL(IsPFChrg,0), Ent_Date=CAST(CAST(GETDATE() AS date) AS datetime), Ent_Uid=1 WHERE Chrg_Id=@chrg",
+    "fixNotes": "Owner question per charge, e.g. MP: 'Round Off (73) -> ROUND OFF 10119? Cash Discount (108) -> DISCOUNT 10116 or Discount A/c 10107? Adjustment (111, both firms) -> which account, or remove Adjustment from the purchase charge set?' FUTURE bills only (and re-saved bills). JobCard set 26 (Engine Oil/Service Tax/Service Charge) is attached to the unused 'Job Card Done' type; pointing its charges or detaching the set is equally fine."
+  },
+  {
+    "id": "CFG-06",
+    "area": "config",
+    "title": "Unused legacy charge heads point to missing or group accounts",
+    "severity": "low",
+    "why": "Charges not in any charge set used by a transaction type cannot reach a bill unless someone adds them to a set; harmless today but a trap when the charge master is reorganised.",
+    "detectSql": "SELECT 'Charge '+CAST(c.Chrg_Id AS varchar(10))+' '+RTRIM(c.Chrg_Name)+' posts to account '+CAST(c.Act_ID AS varchar(12))+CASE WHEN a.Act_Id IS NULL THEN ' (missing)' WHEN a.Act_Cat<>'A' THEN ' (a group)' ELSE ' (inactive)' END Finding, c.Chrg_Id, c.Act_ID Act_Id\nFROM IQCHARGES c LEFT JOIN IQAccmst a ON a.Act_Id=c.Act_ID\nWHERE (a.Act_Id IS NULL OR a.Act_Cat<>'A' OR ISNULL(a.Act_Usage,0)<>0) AND c.Chrg_Id NOT IN (SELECT s.chrg_Id FROM (SELECT DISTINCT cs.chrg_Id, cs.Set_No FROM IQCHRGSETS cs JOIN IQCHRGSETMST m ON m.Set_no=cs.Set_No WHERE EXISTS (SELECT 1 FROM TTypes tt WHERE tt.vousetno=cs.Set_No)) s)",
+    "counts": {
+      "mbm": 6,
+      "mp": 18
+    },
+    "examples": [
+      "MBM: Charge 121 PROJ.DISC posts to account 423 (missing) | 121 | 423",
+      "MBM: Charge 122 DLR.DISC posts to account 423 (missing) | 122 | 423",
+      "MBM: Charge 123 CASH DISC posts to account 423 (missing) | 123 | 423",
+      "MP: Charge 82 Freight posts to account 612 (missing) | 82 | 612",
+      "MP: Charge 110 Credit/Debit Note posts to account 611 (missing) | 110 | 611"
+    ],
+    "fix": "report",
+    "fixSql": "",
+    "fixNotes": "Leave as is (HQ 2015-16 era heads: PROJ.DISC, DLR.DISC, PKGING, CST, add1-3, disc1-3...). Fix only if a charge is put back into use."
+  },
+  {
+    "id": "CFG-07",
+    "area": "config",
+    "title": "Charge sets and charges left behind by the old mk-core prototype",
+    "severity": "medium",
+    "why": "The TypeScript prototype created 'MK Core Verified sale/purchase' charge sets and 'MK Core Round ...' charges on 19 Oct 2026. No transaction type uses the sets, but they show in HQ's charge-set picker and in mk-hq's FirmProfile. MBM charge 136 is on 37 purchase bills and MP charge 131 on 1 bill, so those two charges must stay (HQ reloads a bill's charges from IQDoc_Chrgs).",
+    "detectSql": "SELECT 'Prototype charge set '+CAST(m.Set_no AS varchar(10))+' '+RTRIM(m.Set_name)+' is not used by any transaction type' Finding, CAST(NULL AS int) Chrg_Id\nFROM IQCHRGSETMST m WHERE m.Set_name LIKE 'MK Core%' AND NOT EXISTS (SELECT 1 FROM TTypes tt WHERE tt.vousetno=m.Set_no)\nUNION ALL\nSELECT 'Prototype charge '+CAST(c.Chrg_Id AS varchar(10))+' '+RTRIM(c.Chrg_Name)+' is on no bill', c.Chrg_Id\nFROM IQCHARGES c WHERE c.Chrg_Name LIKE 'MK Core%' AND NOT EXISTS (SELECT 1 FROM IQDoc_Chrgs dc WHERE dc.Chrg_id=c.Chrg_Id)",
+    "counts": {
+      "mbm": 3,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: Prototype charge set 27 MK Core Verified sale f0e57d9e is not used by any transaction type | NULL",
+      "MBM: Prototype charge set 28 MK Core Verified purchase f0e57d9e is not used by any transaction type | NULL",
+      "MBM: Prototype charge 135 MK Core Round sale f0e57d9e is on no bill | 135",
+      "MP: Prototype charge set 27 MK Core Verified purchase f0e57d9e is not used by any transaction type | NULL"
+    ],
+    "fix": "auto",
+    "fixSql": "DELETE cs FROM IQCHRGSETS cs JOIN IQCHRGSETMST m ON m.Set_no=cs.Set_No WHERE m.Set_name LIKE 'MK Core%' AND NOT EXISTS (SELECT 1 FROM TTypes tt WHERE tt.vousetno=m.Set_no);\nDELETE m FROM IQCHRGSETMST m WHERE m.Set_name LIKE 'MK Core%' AND NOT EXISTS (SELECT 1 FROM TTypes tt WHERE tt.vousetno=m.Set_no);\nDELETE c FROM IQCHARGES c WHERE c.Chrg_Name LIKE 'MK Core%' AND NOT EXISTS (SELECT 1 FROM IQCHRGSETS cs WHERE cs.chrg_Id=c.Chrg_Id) AND NOT EXISTS (SELECT 1 FROM IQDoc_Chrgs dc WHERE dc.Chrg_id=c.Chrg_Id)",
+    "fixNotes": "Mirrors HQ's own deletes: charge-set screen refuses only when a TType uses the set, then deletes IQCHRGSETS and IQCHRGSETMST (frmChargeSets.cs:1712-1725); charge delete = proc Charges_Delete (refuses if the charge is in a set or on a bill). Afterwards MBM keeps charge 136 and MP charge 131 (on bills; correct Add type, MBM account 11134, MP account 10119). No bill is touched. Verified in a rolled-back transaction on MKHQ_AUDIT_MBM/MP: detect count 3/1 -> 0/0 after fixSql."
+  },
+  {
+    "id": "CFG-08",
+    "area": "config",
+    "title": "Charge-set rows without a charge-set master",
+    "severity": "low",
+    "why": "IQCHRGSETS set 0 (Freight) has no IQCHRGSETMST row. FillCharges_Trans inner-joins the master, so the rows never load: transaction types with vousetno=0 get no charges at all. Inert, but it hides the fact that those types cannot round (CFG-09).",
+    "detectSql": "SELECT 'IQCHRGSETS set '+CAST(cs.Set_No AS varchar(10))+' row for charge '+CAST(cs.chrg_Id AS varchar(10))+' has no IQCHRGSETMST master' Finding, cs.chrg_Id Chrg_Id\nFROM IQCHRGSETS cs WHERE NOT EXISTS (SELECT 1 FROM IQCHRGSETMST m WHERE m.Set_no=cs.Set_No)",
+    "counts": {
+      "mbm": 1,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: IQCHRGSETS set 0 row for charge 82 has no IQCHRGSETMST master | 82",
+      "MP: IQCHRGSETS set 0 row for charge 82 has no IQCHRGSETMST master | 82"
+    ],
+    "fix": "report",
+    "fixSql": "",
+    "fixNotes": "Leave: HQ's screens cannot reach set 0 and nothing reads it."
+  },
+  {
+    "id": "CFG-09",
+    "area": "config",
+    "title": "Transaction type asks for rounding but its charge set cannot carry the round-off",
+    "severity": "low",
+    "why": "HQ rounds only when the charge grid has rows (FrmInwards.cs:35228) and writes the difference into the LAST row (35239-35243). With no loadable set the RoundedOffTo setting is silently ignored; with a non-round-off last row (e.g. Freight) the round-off would be posted to that charge's account.",
+    "detectSql": "SELECT 'Transaction type '+CAST(tt.TT_ID AS varchar(10))+' '+RTRIM(tt.ttype)+' rounds to '+CAST(tt.RoundedOffTo AS varchar(12))+' but '+CASE WHEN lc.chrg_Id IS NULL THEN 'charge set '+CAST(ISNULL(tt.vousetno,0) AS varchar(10))+' loads no charges, so no rounding happens' ELSE 'the last charge of set '+CAST(tt.vousetno AS varchar(10))+' is '+RTRIM(c.Chrg_Name) END Finding\nFROM TTypes tt\nOUTER APPLY (SELECT TOP 1 cs.chrg_Id FROM IQCHRGSETS cs JOIN IQCHRGSETMST m ON m.Set_no=cs.Set_No WHERE cs.Set_No=tt.vousetno ORDER BY cs.Grd_Indx DESC) lc\nLEFT JOIN IQCHARGES c ON c.Chrg_Id=lc.chrg_Id\nWHERE ISNULL(tt.RoundedOffTo,0)>0 AND (lc.chrg_Id IS NULL OR (c.Chrg_Name NOT LIKE '%round%' AND c.Chrg_Type<>9))",
+    "counts": {
+      "mbm": 1,
+      "mp": 2
+    },
+    "examples": [
+      "MBM: Transaction type 247 Point-To-Point Transfers rounds to 1.00 but charge set 0 loads no charges, so no rounding happens",
+      "MP: Transaction type 245 Stock Transfer - Receipts rounds to 1.00 but charge set 0 loads no charges, so no rounding happens",
+      "MP: Transaction type 247 Point-To-Point Transfers rounds to 1.00 but charge set 0 loads no charges, so no rounding happens"
+    ],
+    "fix": "report",
+    "fixSql": "",
+    "fixNotes": "Only unused types are affected today (MBM 247 Point-To-Point Transfer, MP 245 Stock Transfer Receipt). Report; fix in HQ's transaction-type screen if those types are ever used."
+  },
+  {
+    "id": "CFG-10",
+    "area": "config",
+    "title": "Sales type does not round, and its bills carry paise",
+    "severity": "medium",
+    "why": "A sales type with RoundedOffTo=0 bills exact paise amounts while the other firm/type rounds to the rupee; cash bills with paise are awkward at the counter and differ from the printed habit.",
+    "detectSql": "SELECT 'Transaction type '+CAST(tt.TT_ID AS varchar(10))+' '+RTRIM(tt.ttype)+' has no rounding (RoundedOffTo=0); '+CAST(b.paise AS varchar(10))+' of '+CAST(b.n AS varchar(10))+' bills carry paise' Finding\nFROM TTypes tt CROSS APPLY (SELECT COUNT(*) n, SUM(CASE WHEN h.Bill_Amt<>ROUND(h.Bill_Amt,0) THEN 1 ELSE 0 END) paise FROM IQDoc_Header h WHERE h.Tt_Id=tt.TT_ID) b\nWHERE tt.Vouchtype='Sales' AND ISNULL(tt.Tt_Status,0)=0 AND ISNULL(tt.RoundedOffTo,0)=0 AND b.paise>0",
+    "counts": {
+      "mbm": 1,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: Transaction type 507 IGST Sales has no rounding (RoundedOffTo=0); 1 of 1 bills carry paise",
+      "MP: Transaction type 506 GST Sales has no rounding (RoundedOffTo=0); 96 of 139 bills carry paise"
+    ],
+    "fix": "owner",
+    "fixSql": "-- after owner approval, per type (@tt): same as HQ's transaction-type screen 'Rounded off to 1.00'\nUPDATE TTypes SET RoundedOffTo=1.00, RoundedOffType=0 WHERE TT_ID=@tt",
+    "fixNotes": "Owner question: 'MP GST Sales (and MBM IGST Sales) bills are not rounded to the rupee (96 of 139 MP sales bills have paise). Round them like MBM GST Sales?' FUTURE bills only; requires the set's last charge to be an Add-type Round Off with a real account (MP: CFG-05 first)."
+  },
+  {
+    "id": "CFG-11",
+    "area": "config",
+    "title": "Bank voucher types have no valid default bank account",
+    "severity": "medium",
+    "why": "Bank Receipts/Payments (Trmode=1) preselect TTypes.Bank_naccno (FrmFin_Vouchers.cs:3051/3958). It is 387, which does not exist, so every bank voucher starts with no bank and the operator must pick one; a wrong pick goes unnoticed.",
+    "detectSql": "SELECT 'Transaction type '+CAST(tt.TT_ID AS varchar(10))+' '+RTRIM(tt.ttype)+' default bank '+CAST(ISNULL(tt.Bank_naccno,0) AS varchar(12))+CASE WHEN a.Act_Id IS NULL THEN ' does not exist' ELSE ' is not an active Bank account' END Finding, tt.Bank_naccno Act_Id\nFROM TTypes tt LEFT JOIN IQAccmst a ON a.Act_Id=tt.Bank_naccno\nWHERE tt.Vouchtype IN ('Receipts','Payments') AND tt.Trmode=1 AND (a.Act_Id IS NULL OR a.Act_Type<>'Bank' OR a.Act_Cat<>'A' OR ISNULL(a.Act_Usage,0)<>0)",
+    "counts": {
+      "mbm": 2,
+      "mp": 2
+    },
+    "examples": [
+      "MBM: Transaction type 205 Bank Receipts/Deposits default bank 387 does not exist | 387",
+      "MBM: Transaction type 207 Bank Payments/Withdrawls default bank 387 does not exist | 387",
+      "MP: Transaction type 205 Bank Receipts/Deposits default bank 387 does not exist | 387",
+      "MP: Transaction type 207 Bank Payments/Withdrawls default bank 387 does not exist | 387"
+    ],
+    "fix": "owner",
+    "fixSql": "UPDATE TTypes SET Bank_naccno=@bank WHERE TT_ID IN (205,207)",
+    "fixNotes": "Owner question: 'Which bank should Bank Receipts / Bank Payments open with? (MBM: KARUR VYSYABANK 890 10701 is the bank actually used on bills; MP: THE KARUR YSYABANK 10210 or G PAY 10238)'. Affects data entry defaults only, no posted voucher."
+  },
+  {
+    "id": "CFG-12",
+    "area": "config",
+    "title": "Legacy account columns of transaction types point to missing accounts",
+    "severity": "low",
+    "why": "TTypes still carry VAT-era columns (Exempt/Gross4/Gross145/Gross1/Tax4/Tax145/Tax1/CashDisc/Freight/CrDrNote/Roundoff_ActID) and default Bank/Sub accounts copied from an old template (387, 587, 404-675...). FrmInwards loads them (FrmInwards.cs:30232-30242) but GST posting never reads them, so they are inert.",
+    "detectSql": "SELECT 'Transaction type '+CAST(tt.TT_ID AS varchar(10))+' '+RTRIM(tt.ttype)+' column '+v.col+' = '+CAST(v.a AS varchar(12))+' (missing account)' Finding, v.a Act_Id\nFROM TTypes tt CROSS APPLY (VALUES ('Cash_naccno',tt.Cash_naccno),('Bank_naccno',tt.Bank_naccno),('Sub_naccno',tt.Sub_naccno),('Exempt_ActID',tt.Exempt_ActID),('Gross4_ActID',tt.Gross4_ActID),('Gross145_ActID',tt.Gross145_ActID),('Gross1_ActID',tt.Gross1_ActID),('Tax4_ActID',tt.Tax4_ActID),('Tax145_ActID',tt.Tax145_ActID),('Tax1_ActID',tt.Tax1_ActID),('CashDisc_ActID',tt.CashDisc_ActID),('Freight_ActID',tt.Freight_ActID),('CrDrNote_ActID',tt.CrDrNote_ActID),('Roundoff_ActID',tt.Roundoff_ActID)) v(col,a)\nWHERE ISNULL(v.a,0)>1 AND NOT EXISTS (SELECT 1 FROM IQAccmst a WHERE a.Act_Id=v.a)\n  AND NOT (v.col='Bank_naccno' AND tt.Vouchtype IN ('Receipts','Payments') AND tt.Trmode=1)",
+    "counts": {
+      "mbm": 85,
+      "mp": 68
+    },
+    "examples": [
+      "MBM: Transaction type -2 D Sales column Bank_naccno = 387 (missing account) | 387",
+      "MBM: Transaction type -1 D Returns column Bank_naccno = 387 (missing account) | 387",
+      "MBM: Transaction type 204 Cash Receipts column Bank_naccno = 387 (missing account) | 387",
+      "MP: Transaction type -1 D Returns column Bank_naccno = 387 (missing account) | 387",
+      "MP: Transaction type 204 Cash Receipts column Bank_naccno = 387 (missing account) | 387"
+    ],
+    "fix": "report",
+    "fixSql": "",
+    "fixNotes": "Leave (inert). Bank voucher defaults are CFG-11."
+  },
+  {
+    "id": "CFG-13",
+    "area": "config",
+    "title": "Items missing their Ttype_Acnt row for a current transaction type",
+    "severity": "low",
+    "why": "HQ writes one Ttype_Acnt row per item per TTypes row of the 8 item voucher types (FrmItems.cs Fill_GridVAT_Accounts :10754). Items saved before Transfer In/Out types existed lack those rows; a stock transfer of such an item would find no account. HQ adds them the next time the item is saved.",
+    "detectSql": "SELECT 'Item '+CAST(e.Item_ID AS varchar(10))+' has no Ttype_Acnt row for transaction type '+CAST(e.TT_ID AS varchar(10))+' ('+e.Vouchtype+')' Finding, e.Item_ID Item_ID, e.exp_act Act_Id\nFROM (SELECT i.Item_ID, x.TT_ID, x.Vouchtype, i.VAT, e.lbl, ea.Act_Id exp_act\nFROM IQItems_Mast i CROSS JOIN TTypes x\nOUTER APPLY (SELECT TOP 1 r.lbl FROM (VALUES (CAST(3 AS numeric(9,2)),'3','1.5'),(5,'5','2.5'),(12,'12','6'),(18,'18','9'),(28,'28','14'),(0.1,'0.10','0.05'),(40,'40','20')) r(rate,lbl,half) WHERE r.rate=i.VAT) rr\nCROSS APPLY (SELECT CASE WHEN rr.lbl IS NULL THEN CASE WHEN x.Vouchtype IN ('Purchase','Purchase Return','Purchase Order','Transfer In') THEN N'Purchase '+NCHAR(8211)+N' Exempted' ELSE N'Sales '+NCHAR(8211)+N' Exempt' END\n  ELSE CASE WHEN ISNULL(x.Firstor,0)=0 THEN N'IGST ' ELSE N'GST ' END + CASE WHEN x.Vouchtype IN ('Purchase','Purchase Return','Purchase Order','Transfer In') THEN N'Purchase ' ELSE N'Sales ' END + rr.lbl + N'%' END lbl) e\nOUTER APPLY (SELECT TOP 1 a.Act_Id FROM IQAccmst a WHERE a.Act_TT=e.lbl ORDER BY a.Act_Id DESC) ea\nWHERE x.Vouchtype IN ('Purchase','Sales','Purchase Return','Sales Return','Purchase Order','Sales Order','Transfer In','Transfer Out')) e WHERE NOT EXISTS (SELECT 1 FROM Ttype_Acnt t WHERE t.Ic_Id=e.Item_ID AND t.TT_ID=e.TT_ID)",
+    "counts": {
+      "mbm": 3538,
+      "mp": 510
+    },
+    "examples": [
+      "MBM: Item 1 has no Ttype_Acnt row for transaction type 245 (Transfer In) | 1 | 10046",
+      "MBM: Item 1 has no Ttype_Acnt row for transaction type 512 (Transfer Out) | 1 | 10041",
+      "MBM: Item 21 has no Ttype_Acnt row for transaction type 245 (Transfer In) | 21 | 10320",
+      "MP: Item 1 has no Ttype_Acnt row for transaction type 245 (Transfer In) | 1 | 10124",
+      "MP: Item 1 has no Ttype_Acnt row for transaction type 252 (Transfer Out) | 1 | 10168"
+    ],
+    "fix": "auto",
+    "fixSql": "INSERT INTO Ttype_Acnt (Ic_Id, TT_ID, Act_ID, Set_NO, Ent_Date, Ent_Uid)\nSELECT e.Item_ID, e.TT_ID, e.exp_act, 0, CAST(CAST(GETDATE() AS date) AS datetime), 1\nFROM (SELECT i.Item_ID, x.TT_ID, x.Vouchtype, i.VAT, e.lbl, ea.Act_Id exp_act\nFROM IQItems_Mast i CROSS JOIN TTypes x\nOUTER APPLY (SELECT TOP 1 r.lbl FROM (VALUES (CAST(3 AS numeric(9,2)),'3','1.5'),(5,'5','2.5'),(12,'12','6'),(18,'18','9'),(28,'28','14'),(0.1,'0.10','0.05'),(40,'40','20')) r(rate,lbl,half) WHERE r.rate=i.VAT) rr\nCROSS APPLY (SELECT CASE WHEN rr.lbl IS NULL THEN CASE WHEN x.Vouchtype IN ('Purchase','Purchase Return','Purchase Order','Transfer In') THEN N'Purchase '+NCHAR(8211)+N' Exempted' ELSE N'Sales '+NCHAR(8211)+N' Exempt' END\n  ELSE CASE WHEN ISNULL(x.Firstor,0)=0 THEN N'IGST ' ELSE N'GST ' END + CASE WHEN x.Vouchtype IN ('Purchase','Purchase Return','Purchase Order','Transfer In') THEN N'Purchase ' ELSE N'Sales ' END + rr.lbl + N'%' END lbl) e\nOUTER APPLY (SELECT TOP 1 a.Act_Id FROM IQAccmst a WHERE a.Act_TT=e.lbl ORDER BY a.Act_Id DESC) ea\nWHERE x.Vouchtype IN ('Purchase','Sales','Purchase Return','Sales Return','Purchase Order','Sales Order','Transfer In','Transfer Out')) e WHERE e.exp_act IS NOT NULL AND NOT EXISTS (SELECT 1 FROM Ttype_Acnt t WHERE t.Ic_Id=e.Item_ID AND t.TT_ID=e.TT_ID)",
+    "fixNotes": "Writes the same row Ttype_Acnt_insert writes on an item save: account by HQ's Set_GSTAccounts rule (rate label by Firstor and purchase/sales side, exempt labels for 0%, highest Act_Id with that Act_TT; FrmItems.cs:12723-14417), Set_NO 0, Ent_Date = date at midnight, Ent_Uid 1. Unlike a full re-save it leaves the item's other rows (and their Ent_Date) untouched. No bill is affected; transfers are unused in both firms. Verified in a rolled-back transaction on MKHQ_AUDIT_MBM/MP: detect count 3538/510 -> 0/0 after fixSql."
+  },
+  {
+    "id": "CFG-14",
+    "area": "config",
+    "title": "Ttype_Acnt row disagrees with the item's GST rate (or points to a missing/unpostable account)",
+    "severity": "high",
+    "why": "Bills take the item's sales/purchase ledger from Ttype_Acnt; a wrong rate account files the sale under the wrong GST rate head (GSTR-1/3B summaries by ledger) and a missing account loses the posting.",
+    "detectSql": "SELECT 'Item '+CAST(e.Item_ID AS varchar(10))+' ('+CAST(e.VAT AS varchar(10))+'%) type '+CAST(e.TT_ID AS varchar(10))+': account '+CAST(t.Act_ID AS varchar(12))+' '+ISNULL(a.Act_TT,'(missing)')+' but HQ rule gives '+ISNULL(CAST(e.exp_act AS varchar(12)),'none')+' '+e.lbl Finding, e.Item_ID Item_ID, t.Act_ID Act_Id\nFROM (SELECT i.Item_ID, x.TT_ID, x.Vouchtype, i.VAT, e.lbl, ea.Act_Id exp_act\nFROM IQItems_Mast i CROSS JOIN TTypes x\nOUTER APPLY (SELECT TOP 1 r.lbl FROM (VALUES (CAST(3 AS numeric(9,2)),'3','1.5'),(5,'5','2.5'),(12,'12','6'),(18,'18','9'),(28,'28','14'),(0.1,'0.10','0.05'),(40,'40','20')) r(rate,lbl,half) WHERE r.rate=i.VAT) rr\nCROSS APPLY (SELECT CASE WHEN rr.lbl IS NULL THEN CASE WHEN x.Vouchtype IN ('Purchase','Purchase Return','Purchase Order','Transfer In') THEN N'Purchase '+NCHAR(8211)+N' Exempted' ELSE N'Sales '+NCHAR(8211)+N' Exempt' END\n  ELSE CASE WHEN ISNULL(x.Firstor,0)=0 THEN N'IGST ' ELSE N'GST ' END + CASE WHEN x.Vouchtype IN ('Purchase','Purchase Return','Purchase Order','Transfer In') THEN N'Purchase ' ELSE N'Sales ' END + rr.lbl + N'%' END lbl) e\nOUTER APPLY (SELECT TOP 1 a.Act_Id FROM IQAccmst a WHERE a.Act_TT=e.lbl ORDER BY a.Act_Id DESC) ea\nWHERE x.Vouchtype IN ('Purchase','Sales','Purchase Return','Sales Return','Purchase Order','Sales Order','Transfer In','Transfer Out')) e JOIN Ttype_Acnt t ON t.Ic_Id=e.Item_ID AND t.TT_ID=e.TT_ID LEFT JOIN IQAccmst a ON a.Act_Id=t.Act_ID\nWHERE a.Act_Id IS NULL OR a.Act_Cat<>'A' OR ISNULL(a.Act_Usage,0)<>0 OR ISNULL(a.Act_TT,'')<>e.lbl",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "auto",
+    "fixSql": "UPDATE t SET Act_ID=e.exp_act, Ent_Date=CAST(CAST(GETDATE() AS date) AS datetime), Ent_Uid=1\nFROM Ttype_Acnt t JOIN (SELECT i.Item_ID, x.TT_ID, x.Vouchtype, i.VAT, e.lbl, ea.Act_Id exp_act\nFROM IQItems_Mast i CROSS JOIN TTypes x\nOUTER APPLY (SELECT TOP 1 r.lbl FROM (VALUES (CAST(3 AS numeric(9,2)),'3','1.5'),(5,'5','2.5'),(12,'12','6'),(18,'18','9'),(28,'28','14'),(0.1,'0.10','0.05'),(40,'40','20')) r(rate,lbl,half) WHERE r.rate=i.VAT) rr\nCROSS APPLY (SELECT CASE WHEN rr.lbl IS NULL THEN CASE WHEN x.Vouchtype IN ('Purchase','Purchase Return','Purchase Order','Transfer In') THEN N'Purchase '+NCHAR(8211)+N' Exempted' ELSE N'Sales '+NCHAR(8211)+N' Exempt' END\n  ELSE CASE WHEN ISNULL(x.Firstor,0)=0 THEN N'IGST ' ELSE N'GST ' END + CASE WHEN x.Vouchtype IN ('Purchase','Purchase Return','Purchase Order','Transfer In') THEN N'Purchase ' ELSE N'Sales ' END + rr.lbl + N'%' END lbl) e\nOUTER APPLY (SELECT TOP 1 a.Act_Id FROM IQAccmst a WHERE a.Act_TT=e.lbl ORDER BY a.Act_Id DESC) ea\nWHERE x.Vouchtype IN ('Purchase','Sales','Purchase Return','Sales Return','Purchase Order','Sales Order','Transfer In','Transfer Out')) e ON t.Ic_Id=e.Item_ID AND t.TT_ID=e.TT_ID LEFT JOIN IQAccmst a ON a.Act_Id=t.Act_ID\nWHERE e.exp_act IS NOT NULL AND (a.Act_Id IS NULL OR a.Act_Cat<>'A' OR ISNULL(a.Act_Usage,0)<>0 OR ISNULL(a.Act_TT,'')<>e.lbl)",
+    "fixNotes": "Clean in both firms today (guard check). The fix is what HQ writes when the GST rate combo is re-selected and the item saved (Set_GSTAccounts recomputes every row). FUTURE bills only; bills already posted to a wrong rate head are a GST-return question (owner) and are not touched here. Verified in a rolled-back transaction on MKHQ_AUDIT_MBM/MP: detect count 0/0 -> 0/0 after fixSql."
+  },
+  {
+    "id": "CFG-15",
+    "area": "config",
+    "title": "Ttype_Acnt rows of deleted items",
+    "severity": "info",
+    "why": "Items_delete removes the item but not its Ttype_Acnt rows (documented HQ behaviour, docs/hq-spec-items.md section 1.4). They are never read. Deleting them would make the data differ from what HQ itself leaves.",
+    "detectSql": "SELECT 'Ttype_Acnt rows for deleted item '+CAST(t.Ic_Id AS varchar(10))+' ('+CAST(COUNT(*) AS varchar(10))+' rows)' Finding, t.Ic_Id Item_ID\nFROM Ttype_Acnt t WHERE NOT EXISTS (SELECT 1 FROM IQItems_Mast i WHERE i.Item_ID=t.Ic_Id) GROUP BY t.Ic_Id",
+    "counts": {
+      "mbm": 17,
+      "mp": 2
+    },
+    "examples": [
+      "MBM: Ttype_Acnt rows for deleted item 406 (14 rows) | 406",
+      "MBM: Ttype_Acnt rows for deleted item 407 (14 rows) | 407",
+      "MBM: Ttype_Acnt rows for deleted item 818 (14 rows) | 818",
+      "MP: Ttype_Acnt rows for deleted item 372 (15 rows) | 372",
+      "MP: Ttype_Acnt rows for deleted item 373 (15 rows) | 373"
+    ],
+    "fix": "report",
+    "fixSql": "",
+    "fixNotes": "Leave, to match HQ. Note a re-used Item_ID is impossible (IDENTITY), so they can never attach to a new item."
+  },
+  {
+    "id": "CFG-16",
+    "area": "config",
+    "title": "Ttype_Acnt rows for transaction types that no longer exist or carry no items",
+    "severity": "low",
+    "why": "Rows for a removed TType or a non-item voucher type would be dead weight; HQ leaves them when a type is deleted.",
+    "detectSql": "SELECT 'Ttype_Acnt row item '+CAST(t.Ic_Id AS varchar(10))+' type '+CAST(t.TT_ID AS varchar(10))+CASE WHEN x.TT_ID IS NULL THEN ' (type no longer exists)' ELSE ' (type '+x.Vouchtype+' carries no item accounts)' END Finding, t.Ic_Id Item_ID, t.Act_ID Act_Id\nFROM Ttype_Acnt t LEFT JOIN TTypes x ON x.TT_ID=t.TT_ID WHERE x.TT_ID IS NULL OR x.Vouchtype NOT IN ('Purchase','Sales','Purchase Return','Sales Return','Purchase Order','Sales Order','Transfer In','Transfer Out')",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "report",
+    "fixSql": "",
+    "fixNotes": "None in either firm (guard)."
+  },
+  {
+    "id": "CFG-17",
+    "area": "config",
+    "title": "Item GST rate fields or tax-account columns inconsistent with the item's GST %",
+    "severity": "high",
+    "why": "IQItems_Mast.VIP_ID/VOP_ID (IGST input/output) and CGST/SGST input/output ids decide where each bill line's tax is posted; CGST/SGST/IGST must be VAT/2, VAT/2, VAT. A mismatch posts tax to the wrong rate head.",
+    "detectSql": "SELECT 'Item '+CAST(i.Item_ID AS varchar(10))+' ('+CAST(i.VAT AS varchar(10))+'%): '+c.col+' = '+CAST(ISNULL(c.cur,0) AS varchar(12))+', HQ rule gives '+CAST(ISNULL(ea.Act_Id,0) AS varchar(12)) Finding, i.Item_ID Item_ID, c.cur Act_Id\nFROM IQItems_Mast i\nOUTER APPLY (SELECT TOP 1 r.lbl, r.half FROM (VALUES (CAST(3 AS numeric(9,2)),'3','1.5'),(5,'5','2.5'),(12,'12','6'),(18,'18','9'),(28,'28','14'),(0.1,'0.10','0.05'),(40,'40','20')) r(rate,lbl,half) WHERE r.rate=i.VAT) rr\nCROSS APPLY (VALUES ('VIP_ID',i.VIP_ID,'IGST Input '+rr.lbl+'%'),('VOP_ID',i.VOP_ID,'IGST Output '+rr.lbl+'%'),('CGSTVIP_ID',i.CGSTVIP_ID,'CGST Input '+rr.half+'%'),('CGSTVOP_ID',i.CGSTVOP_ID,'CGST Output '+rr.half+'%'),('SGSTVIP_ID',i.SGSTVIP_ID,'SGST Input '+rr.half+'%'),('SGSTVOP_ID',i.SGSTVOP_ID,'SGST Output '+rr.half+'%')) c(col,cur,lbl)\nOUTER APPLY (SELECT TOP 1 a.Act_Id FROM IQAccmst a WHERE a.Act_TT=c.lbl ORDER BY a.Act_Id DESC) ea\nWHERE ISNULL(c.cur,0)<>ISNULL(ea.Act_Id,0)\nUNION ALL\nSELECT 'Item '+CAST(i.Item_ID AS varchar(10))+': GST '+CAST(i.VAT AS varchar(10))+' but CGST/SGST/IGST = '+CAST(ISNULL(i.CGST,0) AS varchar(10))+'/'+CAST(ISNULL(i.SGST,0) AS varchar(10))+'/'+CAST(ISNULL(i.IGST,0) AS varchar(10)), i.Item_ID, NULL\nFROM IQItems_Mast i WHERE ISNULL(i.CGST,-1)<>i.VAT/2 OR ISNULL(i.SGST,-1)<>i.VAT/2 OR ISNULL(i.IGST,-1)<>i.VAT",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "auto",
+    "fixSql": "UPDATE i SET VIP_ID=ISNULL(x.vip,0), VOP_ID=ISNULL(x.vop,0), CGSTVIP_ID=ISNULL(x.cvip,0), CGSTVOP_ID=ISNULL(x.cvop,0), SGSTVIP_ID=ISNULL(x.svip,0), SGSTVOP_ID=ISNULL(x.svop,0), CGST=i.VAT/2, SGST=i.VAT/2, IGST=i.VAT\nFROM IQItems_Mast i\nOUTER APPLY (SELECT TOP 1 r.lbl, r.half FROM (VALUES (CAST(3 AS numeric(9,2)),'3','1.5'),(5,'5','2.5'),(12,'12','6'),(18,'18','9'),(28,'28','14'),(0.1,'0.10','0.05'),(40,'40','20')) r(rate,lbl,half) WHERE r.rate=i.VAT) rr\nCROSS APPLY (SELECT (SELECT MAX(Act_Id) FROM IQAccmst WHERE Act_TT='IGST Input '+rr.lbl+'%') vip, (SELECT MAX(Act_Id) FROM IQAccmst WHERE Act_TT='IGST Output '+rr.lbl+'%') vop,\n  (SELECT MAX(Act_Id) FROM IQAccmst WHERE Act_TT='CGST Input '+rr.half+'%') cvip, (SELECT MAX(Act_Id) FROM IQAccmst WHERE Act_TT='CGST Output '+rr.half+'%') cvop,\n  (SELECT MAX(Act_Id) FROM IQAccmst WHERE Act_TT='SGST Input '+rr.half+'%') svip, (SELECT MAX(Act_Id) FROM IQAccmst WHERE Act_TT='SGST Output '+rr.half+'%') svop) x\nWHERE ISNULL(i.VIP_ID,0)<>ISNULL(x.vip,0) OR ISNULL(i.VOP_ID,0)<>ISNULL(x.vop,0) OR ISNULL(i.CGSTVIP_ID,0)<>ISNULL(x.cvip,0) OR ISNULL(i.CGSTVOP_ID,0)<>ISNULL(x.cvop,0)\n   OR ISNULL(i.SGSTVIP_ID,0)<>ISNULL(x.svip,0) OR ISNULL(i.SGSTVOP_ID,0)<>ISNULL(x.svop,0) OR ISNULL(i.CGST,-1)<>i.VAT/2 OR ISNULL(i.SGST,-1)<>i.VAT/2 OR ISNULL(i.IGST,-1)<>i.VAT",
+    "fixNotes": "Clean in both firms (guard). The fix reproduces Set_GSTAccounts (all six ids 0 for a rate outside 3/5/12/18/28/0.1/40) and the proc's CGST=SGST=VAT/2, IGST=VAT. FUTURE bills only. A full HQ re-save would also normalise unrelated columns and Ent_Date; this touches only the GST columns. Verified in a rolled-back transaction on MKHQ_AUDIT_MBM/MP: detect count 0/0 -> 0/0 after fixSql."
+  },
+  {
+    "id": "CFG-18",
+    "area": "config",
+    "title": "GST rate account set incomplete, duplicated or unpostable",
+    "severity": "high",
+    "why": "Set_GSTAccounts looks up 10 labels per rate (GST/IGST Purchase/Sales r%, IGST Input/Output r%, CGST/SGST Input/Output r/2%) by IQAccmst.Act_TT, taking the highest Act_Id; a missing label gives account 0 and HQ refuses to save the item (IsEmptyFound needs VIP/VOP>0), a duplicate silently picks the newer account, a group/inactive one cannot be posted.",
+    "detectSql": "SELECT 'GST rate '+r.lbl+'%: label '+l.lbl+CASE WHEN n.cnt=0 THEN ' has no account' WHEN n.cnt>1 THEN ' is on '+CAST(n.cnt AS varchar(5))+' accounts' ELSE ' account is a group or inactive' END Finding, n.maxid Act_Id\nFROM (VALUES (CAST(3 AS numeric(9,2)),'3','1.5'),(5,'5','2.5'),(12,'12','6'),(18,'18','9'),(28,'28','14'),(0.1,'0.10','0.05'),(40,'40','20')) r(rate,lbl,half)\nCROSS APPLY (VALUES ('GST Purchase '+r.lbl+'%'),('GST Sales '+r.lbl+'%'),('IGST Purchase '+r.lbl+'%'),('IGST Sales '+r.lbl+'%'),('IGST Input '+r.lbl+'%'),('IGST Output '+r.lbl+'%'),('CGST Input '+r.half+'%'),('CGST Output '+r.half+'%'),('SGST Input '+r.half+'%'),('SGST Output '+r.half+'%')) l(lbl)\nCROSS APPLY (SELECT COUNT(*) cnt, MAX(a.Act_Id) maxid, SUM(CASE WHEN a.Act_Cat<>'A' OR ISNULL(a.Act_Usage,0)<>0 THEN 1 ELSE 0 END) bad FROM IQAccmst a WHERE a.Act_TT=l.lbl) n\nWHERE n.cnt<>1 OR n.bad>0\nUNION ALL\nSELECT 'Exempt label '+l.lbl+CASE WHEN n.cnt=0 THEN ' has no account' WHEN n.cnt>1 THEN ' is on several accounts' ELSE ' account is a group or inactive' END, n.maxid\nFROM (VALUES (N'Purchase '+NCHAR(8211)+N' Exempted'),(N'Sales '+NCHAR(8211)+N' Exempt')) l(lbl)\nCROSS APPLY (SELECT COUNT(*) cnt, MAX(a.Act_Id) maxid, SUM(CASE WHEN a.Act_Cat<>'A' OR ISNULL(a.Act_Usage,0)<>0 THEN 1 ELSE 0 END) bad FROM IQAccmst a WHERE a.Act_TT=l.lbl) n\nWHERE n.cnt<>1 OR n.bad>0",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "owner",
+    "fixSql": "",
+    "fixNotes": "Complete and unique in both firms for every rate HQ offers (3, 5, 12, 18, 28, 0.1, 40 and exempt) - guard check. If it ever fires, the owner/accountant creates the account through HQ's GST account generation, not by SQL."
+  },
+  {
+    "id": "CFG-19",
+    "area": "config",
+    "title": "GST tax and rate-head accounts classified inconsistently (Input/Purchase heads typed Income)",
+    "severity": "low",
+    "why": "The 2017-era GST accounts (5/12/18/28%, 3%, 1.5/2.5/6/9/14% halves) are all Act_Type 'Income' under Un-Grouped Incomes (MBM) / INCOMES (MP), so input-tax credit and purchase heads sit on the income side of the P&L and output tax is not shown as a liability. Accounts HQ generated later (0.05/0.10/20/40%) follow a different scheme: Purchase heads Expense, Input/Output 20%/40% Liability, Sales Income. Bills and GST returns are unaffected (they key on Act_TT); only financial statements are.",
+    "detectSql": "SELECT 'Account '+CAST(a.Act_Id AS varchar(12))+' '+RTRIM(a.Act_Name)+' is '+a.Act_Type+' (expected '+x.exp+' by the scheme HQ uses for newer rates)' Finding, a.Act_Id\nFROM IQAccmst a CROSS APPLY (SELECT CASE WHEN a.Act_TT LIKE '%GST Purchase%' THEN 'Expense' WHEN a.Act_TT LIKE '%GST Sales%' THEN 'Income' WHEN a.Act_TT LIKE '%GST Input%' OR a.Act_TT LIKE '%GST Output%' THEN 'Liability' END exp) x\nWHERE a.Act_Cat='A' AND a.Act_TT LIKE '%GST %' AND x.exp IS NOT NULL AND a.Act_Type<>x.exp",
+    "counts": {
+      "mbm": 64,
+      "mp": 64
+    },
+    "examples": [
+      "MBM: Account 10320 IGST Purchase 18% is Income (expected Expense by the scheme HQ uses for newer rates) | 10320",
+      "MBM: Account 10321 IGST Input 18% is Income (expected Liability by the scheme HQ uses for newer rates) | 10321",
+      "MBM: Account 10322 CGST Purchase 14% is Income (expected Expense by the scheme HQ uses for newer rates) | 10322",
+      "MP: Account 10124 IGST Purchase 18% is Income (expected Expense by the scheme HQ uses for newer rates) | 10124",
+      "MP: Account 10125 IGST Input 18% is Income (expected Liability by the scheme HQ uses for newer rates) | 10125"
+    ],
+    "fix": "owner",
+    "fixSql": "",
+    "fixNotes": "Owner/accountant question: 'Your GST input/output and purchase rate heads are classified as Income. Do you want them regrouped (input/output tax to Duties & Taxes liability, purchase heads to Purchase/Expense) so the P&L and balance sheet read correctly? This changes reports for all years, not bills or GST returns.' Not automatic: the target groups are the accountant's choice. Note the half-rate 'GST Input/Output r%' accounts (no CGST/SGST prefix) are not used by HQ's item rule at all."
+  },
+  {
+    "id": "CFG-20",
+    "area": "config",
+    "title": "UPI/card sales posted to Cash on hand (no default UPI bank configured)",
+    "severity": "low",
+    "why": "Configs.DefBankActID_ForUPI=0, so for payment modes other than Cash/Credit the operator picks the receiving account each time; some Phone Pe bills were received into 'Cash on hand', which makes the cash book overstate cash.",
+    "detectSql": "SELECT 'Bill '+RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' of '+CONVERT(varchar(10),h.Doc_Date,103)+' paid by '+RTRIM(ISNULL(pm.Mode_CaptionName,CAST(h.Mode AS varchar(5))))+' was received into '+RTRIM(a.Act_Name) Finding, h.Doc_Id, a.Act_Id\nFROM IQDoc_Header h JOIN IQAccmst a ON a.Act_Id=h.Act_ID AND a.Act_Type='Cash' LEFT JOIN Payment_Modes pm ON pm.ModeID=h.Mode\nWHERE h.Mode>=2 AND h.Tt_Id IN (500,501,506,507)",
+    "counts": {
+      "mbm": 5,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Bill CS/78 of 26/04/2026 paid by Phone Pe was received into Cash on hand | 8407 | 6",
+      "MBM: Bill CS/376 of 07/07/2026 paid by Phone Pe was received into Cash on hand | 9064 | 6",
+      "MBM: Bill CS/572 of 25/08/2026 paid by Phone Pe was received into Cash on hand | 9569 | 6"
+    ],
+    "fix": "report",
+    "fixSql": "",
+    "fixNotes": "Owner question: 'Should Phone Pe / G Pay sales default to a bank account (Configs.DefBankActID_ForUPI)? And were these 5 bills really cash?' Re-pointing past receipts is a bill correction (owner, most before 1 Oct 2026)."
+  },
+  {
+    "id": "CFG-21",
+    "area": "config",
+    "title": "Sibling transaction types disagree on tax-inclusive pricing",
+    "severity": "info",
+    "why": "GST Sales (506) defaults to tax-inclusive rates (Inc_Tax=1) but IGST Sales (507) to exclusive; the same item typed at the same rate gives a different bill total depending on the type picked.",
+    "detectSql": "SELECT 'Transaction type '+CAST(t.TT_ID AS varchar(10))+' '+RTRIM(t.ttype)+' Inc_Tax='+CAST(ISNULL(t.Inc_Tax,0) AS varchar(3))+' while '+CAST(g.TT_ID AS varchar(10))+' '+RTRIM(g.ttype)+' Inc_Tax='+CAST(ISNULL(g.Inc_Tax,0) AS varchar(3)) Finding\nFROM TTypes t JOIN TTypes g ON g.Vouchtype=t.Vouchtype AND g.TT_ID IN (500,506) AND g.TT_ID<>t.TT_ID\nWHERE t.TT_ID IN (501,507) AND ISNULL(t.Inc_Tax,0)<>ISNULL(g.Inc_Tax,0)",
+    "counts": {
+      "mbm": 1,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: Transaction type 507 IGST Sales Inc_Tax=0 while 506 GST Sales Inc_Tax=1",
+      "MP: Transaction type 507 IGST Sales Inc_Tax=0 while 506 GST Sales Inc_Tax=1"
+    ],
+    "fix": "report",
+    "fixSql": "",
+    "fixNotes": "Probably intentional (inter-state customers quoted ex-tax). Mention to owner; no change."
+  }
+]

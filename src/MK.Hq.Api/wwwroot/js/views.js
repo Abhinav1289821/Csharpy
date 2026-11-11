@@ -6,32 +6,43 @@ import { printDocument, invoice } from './print.js';
 
 const KIND_TT = { all: '', sales: '506,507', estimates: '249', purchases: '500,501', orders: '248', receipts: '204,205', payments: '206,207', notes: '208,209' };
 const isVoucher = (tt) => tt >= 204 && tt <= 209;
+// Colour of a document type's tag: sales, purchases, orders/estimates, money in, money out, notes.
+// The dashboard's recent list has no ttId, so fall back to HQ's type name there.
+const typeTone = (tt, name = '') => ({ 506: 'sale', 507: 'sale', 500: 'purchase', 501: 'purchase', 249: 'order', 248: 'order', 204: 'in', 205: 'in', 206: 'out', 207: 'out' })[tt]
+  ?? (/order|estimate/i.test(name) ? 'order' : /purchase/i.test(name) ? 'purchase' : /sale/i.test(name) ? 'sale' : /receipt/i.test(name) ? 'in' : /payment/i.test(name) ? 'out' : 'other');
 const modeName = (m) => state.firm.paymentModes.find((x) => x.id === m)?.caption ?? m;
 
 // ------------------------------------------------------------------ dashboard
 export async function dashboardView(root) {
-  const d = await get(`/${firmId()}/reports/dashboard?day=${today()}`);
-  const card = (label, value, sub) => el('div', { class: 'card' }, el('div', { class: 'label' }, label), el('div', { class: 'value' }, value), sub ? el('div', { class: 'sub' }, sub) : null);
+  const [d, drafts] = await Promise.all([get(`/${firmId()}/reports/dashboard?day=${today()}`), get(`/${firmId()}/drafts`).catch(() => [])]);
+  const card = (label, value, sub, tone = '') => el('div', { class: 'card ' + tone }, el('div', { class: 'label' }, label), el('div', { class: 'value' }, value), sub ? el('div', { class: 'sub' }, sub) : null);
+  const action = (href, key, label, hint, primary = false) => el('a', { class: 'action' + (primary ? ' primary' : ''), href },
+    el('span', { class: 'action-key' }, key), el('strong', {}, label), el('small', {}, hint));
   root.replaceChildren(
-    el('h1', {}, state.firm.name), el('p', { class: 'muted' }, `Today ${dmy(d.day)} · live from HQ`),
+    el('div', { class: 'page-head' }, el('div', {}, el('h1', {}, 'Today'), el('p', { class: 'muted' }, `${dmy(d.day)} · figures live from HQ`)),
+      drafts.length ? el('a', { class: 'drafts-waiting', href: '#/drafts' }, `${drafts.length} unsaved ${drafts.length === 1 ? 'bill' : 'bills'} in Drafts →`) : null),
+    el('div', { class: 'actions' },
+      action('#/new/sale', 'F2', 'New sale', 'Cash, credit, card or UPI', true),
+      action('#/new/salesOrder', 'F3', 'Estimate', 'Quotation / sales order'),
+      action('#/new/purchase', 'F4', 'Purchase', 'Supplier bill'),
+      action('#/voucher/cashReceipt', 'F5', 'Receipt', 'Money received'),
+      action('#/capture', 'F11', 'Scan bill photo', 'Read a bill with AI')),
     el('div', { class: 'cards' },
-      card('Sales today', '₹ ' + money(d.salesToday), `${d.billsToday} bills · cash ₹ ${money(d.cashSalesToday)}`),
-      card('Receipts today', '₹ ' + money(d.receiptsToday), `Payments ₹ ${money(d.paymentsToday)}`),
-      card('Cash in hand', '₹ ' + money(d.cashInHand)),
-      card('To receive', '₹ ' + money(d.receivable), 'customers'),
-      card('To pay', '₹ ' + money(d.payable), 'suppliers'),
-      card('Sales this month', '₹ ' + money(d.salesMonth), `Year ₹ ${money(d.salesYear)}`)),
-    el('div', { class: 'row', style: { margin: '14px 0' } },
-      el('a', { class: 'btn primary', href: '#/new/sale' }, 'New sale (F2)'), el('a', { class: 'btn', href: '#/new/salesOrder' }, 'Estimate (F3)'),
-      el('a', { class: 'btn', href: '#/new/purchase' }, 'Purchase (F4)'), el('a', { class: 'btn', href: '#/voucher/cashReceipt' }, 'Receipt (F5)')),
-    el('h2', {}, 'Recent'), docTable(d.recent.map((r) => ({ ...r, reference: r.reference, party: r.party, amount: r.amount, typeName: r.typeName }))));
+      card('Sales today', '₹ ' + money(d.salesToday), `${d.billsToday} bills · cash ₹ ${money(d.cashSalesToday)}`, 'tone-accent'),
+      card('Receipts today', '₹ ' + money(d.receiptsToday), `Payments ₹ ${money(d.paymentsToday)}`, 'tone-ok'),
+      card('Cash in hand', '₹ ' + money(d.cashInHand), null, 'tone-ink'),
+      card('To receive', '₹ ' + money(d.receivable), 'from customers', 'tone-ok'),
+      card('To pay', '₹ ' + money(d.payable), 'to suppliers', 'tone-danger'),
+      card('Sales this month', '₹ ' + money(d.salesMonth), `Year ₹ ${money(d.salesYear)}`, 'tone-accent')),
+    el('div', { class: 'section-head' }, el('h2', {}, 'Recent bills & vouchers'), el('a', { href: '#/documents', class: 'link' }, 'See all (F7) →')),
+    docTable(d.recent.map((r) => ({ ...r, reference: r.reference, party: r.party, amount: r.amount, typeName: r.typeName }))));
 }
 
 function docTable(rows) {
   return el('div', { class: 'panel scroll' }, el('table', { class: 'grid' },
     el('thead', {}, el('tr', {}, ['Date', 'Type', 'No.', 'Party', 'Mode', 'Amount', 'Open'].map((h, i) => el('th', { class: i >= 5 ? 'n' : '' }, h)))),
     el('tbody', {}, rows.map((r) => el('tr', { class: 'click', onclick: () => (location.hash = `#/doc/${r.documentId}`) },
-      el('td', {}, dmy(r.date)), el('td', {}, r.typeName), el('td', {}, r.reference), el('td', {}, r.party, r.town ? el('small', { class: 'muted' }, ' · ' + r.town) : null),
+      el('td', {}, dmy(r.date)), el('td', {}, el('span', { class: 'tag ' + typeTone(r.ttId, r.typeName) }, r.typeName)), el('td', { class: 'ref' }, r.reference), el('td', {}, r.party, r.town ? el('small', { class: 'muted' }, ' · ' + r.town) : null),
       el('td', {}, r.mode === undefined ? '' : isVoucher(r.ttId) ? '' : modeName(r.mode)), el('td', { class: 'n' }, money(r.amount)),
       el('td', { class: 'n' }, r.open ? money(r.open) : ''))))));
 }
@@ -55,9 +66,10 @@ export async function documentsView(root) {
     el('div', { class: 'panel row' },
       el('select', { onchange: (e) => { f.kind = e.target.value; reload(); } }, Object.keys(KIND_TT).map((k) => el('option', { value: k }, k[0].toUpperCase() + k.slice(1)))),
       el('label', { class: 'field' }, el('span', {}, 'From'), input('from', { type: 'date' })), el('label', { class: 'field' }, el('span', {}, 'To'), input('to', { type: 'date' })),
-      el('label', { class: 'field grow' }, el('span', {}, 'Search party / number / supplier bill'), input('q', { placeholder: 'e.g. CS/879 or ramu' }))),
+      el('label', { class: 'field grow' }, el('span', {}, 'Search party / number / supplier bill'), input('q', { placeholder: 'e.g. CS/879 or ramu  ·  Enter opens the top bill', 'data-rows': '', autofocus: true }))),
     out);
   await load();
+  root.querySelector('[data-rows]')?.focus();
 }
 
 export async function documentView(root, id) {
@@ -80,17 +92,29 @@ export async function documentView(root, id) {
     el('div', { class: 'row spread' },
       el('div', {}, el('h1', {}, `${s.typeName} ${s.reference}`), el('div', { class: 'muted' }, `${dmy(s.date)} · ${d.party.name} · ${voucher ? '' : d.paymentCaption + ' · '}entered on ${s.enteredOn || 'HQ'}${s.modifyCnt > 2 ? ` · edited ${s.modifyCnt - 2}×` : ''}`)),
       el('div', { class: 'row' },
-        !voucher ? el('button', { class: 'btn', onclick: () => printDocument(id) }, 'Print') : null,
-        s.ttId === 249 ? el('a', { class: 'btn', href: `#/from-order/${id}` }, 'Make sale bill') : null,
-        editable ? el('a', { class: 'btn', href: `#/edit/${kindOf}/${id}` }, 'Edit') : null,
-        voucher ? el('a', { class: 'btn', href: `#/edit-voucher/${s.ttId}/${id}` }, 'Correct') : null,
-        el('button', { class: 'btn danger', onclick: remove }, 'Delete'))),
+        !voucher ? el('button', { class: 'btn primary', onclick: () => printDocument(id) }, 'Print (P)') : null,
+        s.ttId === 249 ? el('a', { class: 'btn', href: `#/from-order/${id}` }, 'Make sale bill (S)') : null,
+        editable ? el('a', { class: 'btn', href: `#/edit/${kindOf}/${id}` }, 'Edit (E)') : null,
+        voucher ? el('a', { class: 'btn', href: `#/edit-voucher/${s.ttId}/${id}` }, 'Correct (E)') : null,
+        el('button', { class: 'btn danger btn-apart', onclick: remove }, 'Delete'))),
     voucher ? null : el('div', { class: 'panel paper', style: { marginTop: '12px', maxWidth: '900px' } }, invoice(d)),
     el('h2', {}, 'HQ ledger'),
     el('div', { class: 'panel' }, el('table', { class: 'grid' }, el('thead', {}, el('tr', {}, el('th', {}, 'Account'), el('th', {}, 'Type'), el('th', { class: 'n' }, 'Amount'))),
       el('tbody', {}, d.ledger.map((r) => el('tr', {}, el('td', {}, r.accountName), el('td', {}, { D: 'Debit', C: 'Credit', P: 'Cash paid', R: 'Cash received' }[r.type] ?? r.type), el('td', { class: 'n' }, money(r.amount))))))),
     d.settlements.length ? [el('h2', {}, 'Settled with'), el('div', { class: 'panel' }, el('table', { class: 'grid' }, el('tbody', {},
       d.settlements.map((x) => el('tr', { class: 'click', onclick: () => (location.hash = `#/doc/${x.documentId}`) }, el('td', {}, x.reference), el('td', {}, dmy(x.date)), el('td', { class: 'n' }, money(x.amount)))))))] : null);
+  // Letter keys for the common next steps (a customer asking for a copy is P).
+  const alive = el('span', { hidden: true });
+  root.append(alive);
+  const keys = (e) => {
+    if (!alive.isConnected) return document.removeEventListener('keydown', keys);
+    if (e.ctrlKey || e.altKey || document.querySelector('.modal-back') || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+    const k = e.key.toLowerCase();
+    if (k === 'p' && !voucher) { e.preventDefault(); printDocument(id); }
+    else if (k === 'e' && (editable || voucher)) { e.preventDefault(); location.hash = editable ? `#/edit/${kindOf}/${id}` : `#/edit-voucher/${s.ttId}/${id}`; }
+    else if (k === 's' && s.ttId === 249) { e.preventDefault(); location.hash = `#/from-order/${id}`; }
+  };
+  document.addEventListener('keydown', keys);
 }
 
 // ------------------------------------------------------------------ ledger
@@ -103,7 +127,11 @@ export async function ledgerView(root, accountId) {
   const load = async () => {
     if (!accountId) return;
     const r = await get(`/${firmId()}/reports/ledger/${accountId}?from=${f.from}&to=${f.to}`);
-    out.replaceChildren(el('div', { class: 'row spread', style: { margin: '10px 0' } }, el('h2', {}, `${r.accountName} · ${r.accountType}`),
+    // The balance is the question at the counter ("how much do I owe?"), so it leads.
+    out.replaceChildren(el('div', { class: 'ledger-head' },
+      el('div', {}, el('h2', {}, r.accountName), el('div', { class: 'muted' }, `${r.accountType} · ${dmy(r.from)} to ${dmy(r.to)}`)),
+      el('div', { class: 'ledger-balance' }, el('span', {}, r.closing >= 0 ? 'Balance due (Dr)' : 'Balance in credit (Cr)'), el('strong', {}, '₹ ' + money(Math.abs(r.closing))))),
+      el('div', { class: 'row spread', style: { margin: '6px 0 10px' } }, el('span', { class: 'muted' }, `${r.lines.length} entries · ↓ to move, Enter opens`),
       el('button', { class: 'btn small', onclick: () => csv(r.lines, [{ title: 'Date', get: 'date' }, { title: 'No', get: 'reference' }, { title: 'Type', get: 'typeName' }, { title: 'Narration', get: 'narration' }, { title: 'Debit', get: 'debit' }, { title: 'Credit', get: 'credit' }, { title: 'Balance', get: 'balance' }], `ledger-${r.accountName}.csv`) }, 'Export CSV')),
       el('div', { class: 'panel scroll' }, el('table', { class: 'grid' },
         el('thead', {}, el('tr', {}, ['Date', 'No.', 'Type', 'Particulars', 'Debit', 'Credit', 'Balance'].map((h, i) => el('th', { class: i >= 4 ? 'n' : '' }, h)))),
@@ -174,7 +202,7 @@ export async function stockView(root) {
   const body = el('tbody');
   const render = () => body.replaceChildren(...shown.slice(0, 600).map((r) => el('tr', {}, el('td', {}, r.name), el('td', {}, r.group), el('td', {}, r.unit),
     el('td', { class: 'n' }, qty(r.stock)), el('td', { class: 'n' }, money(r.purchaseRate)), el('td', { class: 'n' }, money(r.saleRate)), el('td', { class: 'n' }, money(r.value)), el('td', {}, dmy(r.lastSale)))));
-  const search = el('input', { placeholder: 'Filter items…' });
+  const search = el('input', { placeholder: 'Filter items…', 'data-rows': '' });
   search.addEventListener('input', () => { const t = search.value.toLowerCase(); shown = rows.filter((r) => (r.name + ' ' + r.group + ' ' + r.code).toLowerCase().includes(t)); render(); });
   root.replaceChildren(el('div', { class: 'row spread' }, el('h1', {}, 'Stock'), el('div', { class: 'row' }, search,
       el('button', { class: 'btn small', onclick: () => csv(shown, [{ title: 'Item', get: 'name' }, { title: 'Group', get: 'group' }, { title: 'Stock', get: 'stock' }, { title: 'Purchase rate', get: 'purchaseRate' }, { title: 'Sale rate', get: 'saleRate' }, { title: 'Value', get: 'value' }], 'stock.csv') }, 'Export CSV'))),
@@ -206,11 +234,19 @@ export async function healthView(root) {
 }
 
 // ------------------------------------------------------------------ drafts
+// "Today 11:51 pm" / "08-11-2026 12:25 pm": short enough to scan down a list.
+const when = (iso) => {
+  const d = new Date(iso);
+  const t = d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+  const day = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  return (day === today() ? 'Today' : dmy(day)) + ' ' + t;
+};
 export async function draftsView(root) {
   const rows = await get(`/${firmId()}/drafts`);
   root.replaceChildren(el('h1', {}, 'Drafts'), el('p', { class: 'muted' }, 'Bills being prepared. Nothing here is in HQ until saved.'),
-    rows.length ? el('div', { class: 'panel' }, el('table', { class: 'grid' }, el('tbody', {}, rows.map((d) => el('tr', {},
-      el('td', { class: 'click', onclick: () => (location.hash = `#/draft/${d.id}`) }, d.title), el('td', { class: 'muted' }, new Date(d.updatedAt).toLocaleString('en-IN')),
-      el('td', { class: 'n' }, el('button', { class: 'btn small danger', onclick: async () => { await del(`/${firmId()}/drafts/${d.id}`); draftsView(root); } }, 'Discard')))))))
-      : el('p', {}, 'No drafts.'));
+    rows.length ? el('div', { class: 'panel' }, el('table', { class: 'grid' }, el('tbody', {}, rows.map((d) => el('tr', { class: 'click', onclick: () => (location.hash = `#/draft/${d.id}`) },
+      el('td', {}, d.title), el('td', { class: 'muted' }, when(d.updatedAt)),
+      el('td', { class: 'n' }, el('button', { class: 'btn small danger', onclick: async (e) => { e.stopPropagation(); await del(`/${firmId()}/drafts/${d.id}`); draftsView(root); } }, 'Discard')))))))
+      : el('p', {}, 'No drafts. A bill you leave before saving is kept here automatically.'),
+    rows.length ? el('p', { class: 'muted' }, '↓ to move, Enter opens. A bill you leave before saving is kept here automatically.') : null);
 }

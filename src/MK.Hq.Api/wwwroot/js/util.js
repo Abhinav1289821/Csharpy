@@ -68,6 +68,12 @@ export function modal(build) {
       if (e.key === 'Escape') {
         e.stopPropagation();
         close(undefined);
+        return;
+      }
+      // Buttons marked data-key="p" answer to that letter (when not typing in a box).
+      if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName ?? '')) {
+        const b = back.querySelector(`button[data-key="${e.key.toLowerCase()}"]`);
+        if (b) { e.preventDefault(); e.stopPropagation(); b.click(); }
       }
     };
     const back = el('div', { class: 'modal-back', onmousedown: (e) => e.target === back && close(undefined) }, el('div', { class: 'modal' }, build(close)));
@@ -91,12 +97,14 @@ export async function confirmBox(title, body, okText = 'Confirm', danger = false
  * Keyboard lookup: type to filter, ↑/↓ to move, Enter/Tab to choose, Esc to close.
  * search(text) returns [{ label, hint, value }]. onPick(value) is called on choice.
  */
-export function lookup({ placeholder = '', value = '', search, onPick, onInput, autofocus = false, className = '' }) {
+export function lookup({ placeholder = '', value = '', search, onPick, onInput, autofocus = false, className = '', explicit = false }) {
   const input = el('input', { placeholder, value, autocomplete: 'off', spellcheck: 'false', class: className });
   const list = el('div', { class: 'lookup-list', hidden: true });
   const wrap = el('div', { class: 'lookup' }, input, list);
   let items = [];
-  let sel = 0;
+  // explicit: nothing is highlighted until ↓ is pressed, so Enter/Tab keep the typed text instead of picking a match.
+  const start = explicit ? -1 : 0;
+  let sel = start;
   const render = () => {
     list.replaceChildren(...items.map((it, i) => el('div', { class: i === sel ? 'sel' : '', onmousedown: (e) => { e.preventDefault(); choose(i); } },
       el('span', {}, it.label), it.hint ? el('small', {}, it.hint) : null)));
@@ -113,7 +121,7 @@ export function lookup({ placeholder = '', value = '', search, onPick, onInput, 
   input.addEventListener('input', () => {
     onInput?.(input.value);
     items = input.value.trim() ? search(input.value) : [];
-    sel = 0;
+    sel = start;
     render();
   });
   input.addEventListener('focus', () => input.select());
@@ -121,8 +129,11 @@ export function lookup({ placeholder = '', value = '', search, onPick, onInput, 
   input.addEventListener('keydown', (e) => {
     if (list.hidden) return;
     if (e.key === 'ArrowDown') { sel = Math.min(sel + 1, items.length - 1); render(); e.preventDefault(); }
-    else if (e.key === 'ArrowUp') { sel = Math.max(sel - 1, 0); render(); e.preventDefault(); }
-    else if (e.key === 'Enter' || e.key === 'Tab') { if (items.length) { e.preventDefault(); choose(sel); } }
+    else if (e.key === 'ArrowUp') { sel = Math.max(sel - 1, start); render(); e.preventDefault(); }
+    else if (e.key === 'Enter' || e.key === 'Tab') {
+      if (items.length && sel >= 0) { e.preventDefault(); choose(sel); }
+      else { items = []; render(); }
+    }
     else if (e.key === 'Escape') { items = []; render(); e.stopPropagation(); }
   });
   if (autofocus) setTimeout(() => input.focus(), 0);

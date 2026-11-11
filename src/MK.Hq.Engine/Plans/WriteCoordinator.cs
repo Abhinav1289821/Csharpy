@@ -25,6 +25,12 @@ public sealed record WriteEvidence(string Kind, long DocumentId, int? ExpectedMo
 
     public long? AfterEntry { get; init; }
 
+    /// <summary>A data repair: its own detection query (a COUNT) is the evidence. Zero findings after a crash means it committed;
+    /// otherwise the outcome is left open and re-running the repair is safe (repairs only touch what the check still finds).</summary>
+    public const string Repair = "repair";
+
+    public string? ProbeSql { get; init; }
+
     /// <summary>For an account change: the account's content before and after the write.</summary>
     public string? Fingerprint { get; init; }
     public string? PreviousFingerprint { get; init; }
@@ -189,6 +195,7 @@ public sealed class WriteCoordinator(
                 WriteEvidence.ItemCreate => await s.ScalarAsync<int>("SELECT COUNT(*) FROM dbo.IQItems_Mast WHERE Item_ID=@id", new { id = evidence.DocumentId }) > 0,
                 WriteEvidence.ItemUpdate => await s.ScalarAsync<long>("SELECT ISNULL(MAX(ItemUnitsDtldID),0) FROM dbo.IQItems_Units WHERE Item_ID=@id AND Recd_ID=0", new { id = evidence.DocumentId }) > evidence.AfterEntry,
                 WriteEvidence.AccountCreate => await s.ScalarAsync<int>("SELECT COUNT(*) FROM dbo.IQAccmst WHERE Act_Id=@id", new { id = evidence.DocumentId }) > 0,
+                WriteEvidence.Repair => evidence.ProbeSql is { } probe && await s.ScalarAsync<int>(probe) == 0 ? true : null,
                 WriteEvidence.AccountUpdate => await s.ScalarAsync<string?>(WriteEvidence.AccountFingerprintSql, new { id = evidence.DocumentId }) is var now
                     && now == evidence.Fingerprint ? true : now == evidence.PreviousFingerprint ? false : null,
                 WriteEvidence.Create when header is not null => true,

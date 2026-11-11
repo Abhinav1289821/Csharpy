@@ -59,7 +59,7 @@ export async function itemsView(root) {
         el('td', {}, i.name, i.active ? null : el('small', { class: 'muted' }, ' · inactive')), el('td', {}, i.code), el('td', {}, i.group), el('td', {}, i.hsn),
         el('td', { class: 'n' }, Number(i.igst)), el('td', { class: 'n' }, money(i.purchaseRate)), el('td', { class: 'n' }, money(i.saleRate)), el('td', { class: 'n' }, Number(i.stock))))))));
   };
-  const search = el('input', { placeholder: 'Search name, code, group or HSN…', autofocus: true });
+  const search = el('input', { placeholder: 'Search name, code, group or HSN  ·  Enter opens the top item', autofocus: true, 'data-rows': '' });
   search.addEventListener('input', debounce(() => show(search.value.trim()), 150));
   root.replaceChildren(
     el('div', { class: 'row spread' }, el('h1', {}, 'Items'), el('a', { class: 'btn primary', href: '#/items/new' }, '+ New item')),
@@ -132,7 +132,7 @@ export async function accountsView(root, filter = 'all') {
         el('td', {}, p.name, p.active ? null : el('small', { class: 'muted' }, ' · inactive')), el('td', {}, p.type), el('td', {}, p.town), el('td', {}, p.mobile || p.phone),
         el('td', {}, p.gstin), el('td', { class: 'n' }, money(Math.abs(p.balance)) + (p.balance >= 0 ? ' Dr' : ' Cr'))))))));
   };
-  const search = el('input', { placeholder: 'Search name, town, mobile or GSTIN…' });
+  const search = el('input', { placeholder: 'Search name, town, mobile or GSTIN  ·  Enter opens the top one', 'data-rows': '' });
   search.addEventListener('input', debounce(() => show(search.value.trim()), 150));
   const pick = el('select', { onchange: (e) => (location.hash = `#/accounts?${e.target.value}`) },
     [['all', 'All parties'], ['Customer', 'Customers'], ['Supplier', 'Suppliers']].map(([k, t]) => el('option', { value: k, selected: k === filter }, t)));

@@ -30,12 +30,18 @@ builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = 30 * 1024 * 
 var pairing = new PhonePairing(hq);
 builder.Services.AddSingleton(pairing);
 builder.Services.AddHostedService<CaptureWorker>();
+// The assistant: Google Antigravity (agy acp) with MK's tools served at /mcp.
+builder.Services.AddSingleton(builder.Configuration.GetSection("Agent").Get<MK.Hq.Api.Agent.AgentOptions>() ?? new MK.Hq.Api.Agent.AgentOptions());
+builder.Services.AddSingleton<MK.Hq.Api.Agent.AgentHub>();
+builder.Services.AddSingleton<MK.Hq.Api.Agent.AgentTools>();
 var mainUrls = builder.Configuration["urls"] ?? "http://127.0.0.1:47320";
 // Phone uploads: a second listener on the shop LAN that serves ONLY the photo page (see CaptureEndpoints.MapPhone).
 builder.WebHost.UseUrls(pairing.Enabled ? $"{mainUrls};http://{pairing.LanAddress}:{pairing.Port}" : mainUrls);
 
 var app = builder.Build();
 var token = ApiToken.LoadOrCreate(hq.DataDirectory);
+app.Services.GetRequiredService<MK.Hq.Api.Agent.AgentHub>().ToolsBaseUrl =
+    app.Services.GetRequiredService<MK.Hq.Api.Agent.AgentOptions>().ToolsBaseUrl ?? mainUrls.Split(';')[0];
 app.Logger.LogInformation("MK HQ Billing: open {Url}/#token={Token}", mainUrls.Split(';')[0], token);
 if (pairing.Enabled) app.Logger.LogInformation("Phone uploads on http://{Lan}:{Port}/m/… (QR codes only)", pairing.LanAddress, pairing.Port);
 
@@ -184,6 +190,15 @@ firm.MapGet("/masters/accounts/{id:long}", (string firm, long id, AccountMasterS
 firm.MapPost("/masters/accounts/preview", (string firm, AccountRequest body, AccountMasterService s, CancellationToken ct) => s.PreviewAsync(firm, body, ct));
 firm.MapPost("/masters/accounts", (string firm, AccountPost body, AccountMasterService s, CancellationToken ct) => s.SaveAsync(firm, body, ct));
 
+// ---- item clean-up: the owner's guided review of proposed names; nothing reaches HQ until "apply" ----
+firm.MapPost("/cleanup/import", (string firm, CleanupFile body, ItemCleanupService s, CancellationToken ct) => s.ImportAsync(firm, body, ct));
+firm.MapGet("/cleanup", (string firm, ItemCleanupService s) => s.Summary(firm));
+firm.MapGet("/cleanup/items", (string firm, string stage, string? ids, int? take, ItemCleanupService s) =>
+    s.List(firm, stage, string.IsNullOrWhiteSpace(ids) ? null : ids.Split(',').Select(long.Parse).ToList(), take ?? 200));
+firm.MapPost("/cleanup/decide", (string firm, CleanupAnswer[] body, ItemCleanupService s) => s.Decide(firm, body.Select(a => (a.ItemId, a.Decision)).ToList()));
+firm.MapPost("/cleanup/rules", (string firm, CleanupRuleAnswer body, ItemCleanupService s) => s.DecideRule(firm, body.Rule, body.Decision));
+firm.MapPost("/cleanup/apply", (string firm, CleanupRun body, ItemCleanupService s, CancellationToken ct) => s.ApplyAsync(firm, body.BatchId, body.Take ?? 20, ct));
+
 // ---- reports ----
 firm.MapGet("/reports/dashboard", (string firm, DateOnly? day, ReportService r, CancellationToken ct) => r.DashboardAsync(firm, day ?? DateOnly.FromDateTime(DateTime.Now), ct));
 firm.MapGet("/reports/ledger/{id:long}", (string firm, long id, DateOnly? from, DateOnly? to, ReportService r, CancellationToken ct) => r.LedgerAsync(firm, id, from, to, ct));
@@ -198,6 +213,12 @@ firm.MapGet("/reports/register", (string firm, string? kind, DateOnly? from, Dat
 });
 firm.MapGet("/reports/stock", (string firm, ReportService r, CancellationToken ct) => r.StockAsync(firm, ct));
 firm.MapGet("/integrity", (string firm, FirmRegistry firms, HqContract contract, CancellationToken ct) => Integrity.CheckAsync(firms.Get(firm), contract, ct));
+// ---- data health: audited checks; automatic repairs go through the same write path as bills ----
+firm.MapGet("/health/checks", (string firm, string? area, MK.Hq.Engine.Integrity.IntegrityService s, CancellationToken ct) => s.RunAsync(firm, area, ct));
+firm.MapPost("/health/{check}/preview", (string firm, string check, MK.Hq.Engine.Integrity.IntegrityService s, CancellationToken ct) => s.PreviewRepairAsync(firm, check, ct));
+firm.MapPost("/health/{check}/repair", (string firm, string check, RepairRun body, MK.Hq.Engine.Integrity.IntegrityService s, CancellationToken ct) =>
+    s.RepairAsync(firm, check, body.OperationId, body.ExpectedHash, body.Decided, ct));
+firm.MapGet("/health/log", (string firm, MK.Hq.Engine.Integrity.IntegrityService s) => s.Log(firm));
 firm.MapPost("/contract/accept", async (string firm, FirmRegistry firms, HqContract contract, CancellationToken ct) => await contract.CheckAsync(firms.Get(firm), acceptCurrent: true, ct));
 
 // ---- drafts (work in progress, never in HQ) ----
@@ -237,9 +258,16 @@ firm.MapGet("/events", async (string firm, HttpContext ctx, FirmRegistry firms, 
     }
 });
 
+MK.Hq.Api.Agent.AgentEndpoints.Map(app, api);
+
 app.MapFallbackToFile("index.html");
 app.Run();
 
 public sealed record DraftBody(string Kind, string Title, JsonElement Payload, int Version);
+
+public sealed record CleanupAnswer(long ItemId, CleanupDecision Decision);
+public sealed record CleanupRuleAnswer(string Rule, string? Decision);
+public sealed record CleanupRun(string? BatchId, int? Take);
+public sealed record RepairRun(string OperationId, string ExpectedHash, bool Decided = false);
 
 public partial class Program;
