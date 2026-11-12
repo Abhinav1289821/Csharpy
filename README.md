@@ -85,6 +85,7 @@ every keystroke is priced by the server (about 50 ms warm).
 | `PlannerTests` | Pure domain rules | 11 of 11 |
 | `MasterParityTests` | Items and accounts: clones of HQ-made masters equal the originals; HQ-saved masters re-save identically | 25 + 25 items, 20 + 6 accounts identical |
 | `VoucherAmendTests` | Vouchers corrected in place: HQ's own vouchers re-saved unchanged come back identical; settlements move between bills | 26 of 26 |
+| `IntegrityTests` | On scratch restores of the latest live backups (`Databases\`), every data-health check runs and counts as listed; every repair (and every owner decision, answered yes with the first choice) clears what it targets and makes no other check worse | 112 checks; 22 automatic repairs, the decisions one by one |
 
 Values the replay deliberately does not compare are listed in the tests with the reason: capture timestamps,
 identity columns, item-master values that changed after the original bill, and two columns that changed with HQ's
@@ -102,6 +103,30 @@ own update around 30 Oct and 4 Nov 2026.
 - The TypeScript prototype refused every bill with a non-zero round-off (most MBM bills), wrote `Bill_Time` in 12-hour
   format (HQ uses 24-hour), invented a purchase margin percentage HQ stores as 0, and missed several fields HQ fills.
   The replay oracle caught all of these.
+
+## Data health (audits and repairs)
+
+*Data health* lists 112 checks in nine areas (ledger and settlements; charges, tax heads and account mappings;
+customers and suppliers; bills, orders and stock; between the two firms; GST returns; HQ change history; database
+structure; passwords and access). Each line says in plain words what is wrong, how many, and the next step:
+
+- **MK can repair** (22): the repair is HQ's own write (its procedures, its account-screen re-save, its stock
+  refresh) done in one SERIALIZABLE transaction under MK's write lock. The check runs again inside the transaction
+  and must find nothing, or everything rolls back. Repairs that touch many accounts give each one a savepoint: one
+  HQ's own form rules refuse (e.g. a GSTIN of the wrong length) is undone and stays listed; the rest go through.
+- **Needs your decision** (57): the question is put first. Some take a value: which account a charge posts to, which
+  bank vouchers open with, the corrected GSTIN (suggested where a one-letter correction makes it valid, or typed).
+  Nothing is preselected. Bills of months whose GST is likely filed (before 1 Oct 2026) are always a decision.
+- **For information** (33): shown, never changed (e.g. invoice-number gaps for GSTR-1 Table 13, deleted bills).
+
+Order is enforced (the Round Off setting before the bills it posts; duplicate account codes before other account
+re-saves). Every repair is logged in `integrity.db`, never in HQ. Cross-firm checks only report: a repair there would
+write the other firm's database outside its lock. `CompanyDatabase` (ISTMAIN) is read for the company and user checks.
+
+The audits behind the checks, with the evidence and the HQ source each repair follows, are in `docs/audit/`
+(`ledger`, `config`, `parties`, `transactions`, `crossfirm`); `docs/audit/plain.json` holds the shop's wording.
+`python tools/integrity/build_catalogue.py` merges them into the engine's catalogue: duplicates found by two audits
+kept once, partial and per-finding repairs declared, and nothing that needs an unknown value offered as a button.
 
 ## Bill photos (Google Gemma 4)
 

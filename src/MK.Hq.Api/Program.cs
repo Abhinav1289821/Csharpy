@@ -217,7 +217,7 @@ firm.MapGet("/integrity", (string firm, FirmRegistry firms, HqContract contract,
 firm.MapGet("/health/checks", (string firm, string? area, MK.Hq.Engine.Integrity.IntegrityService s, CancellationToken ct) => s.RunAsync(firm, area, ct));
 firm.MapPost("/health/{check}/preview", (string firm, string check, MK.Hq.Engine.Integrity.IntegrityService s, CancellationToken ct) => s.PreviewRepairAsync(firm, check, ct));
 firm.MapPost("/health/{check}/repair", (string firm, string check, RepairRun body, MK.Hq.Engine.Integrity.IntegrityService s, CancellationToken ct) =>
-    s.RepairAsync(firm, check, body.OperationId, body.ExpectedHash, body.Decided, ct));
+    s.RepairAsync(firm, check, body.OperationId, body.ExpectedHash, body.Decided, body.Key, body.Choice, ct));
 firm.MapGet("/health/log", (string firm, MK.Hq.Engine.Integrity.IntegrityService s) => s.Log(firm));
 firm.MapPost("/contract/accept", async (string firm, FirmRegistry firms, HqContract contract, CancellationToken ct) => await contract.CheckAsync(firms.Get(firm), acceptCurrent: true, ct));
 
@@ -268,6 +268,6 @@ public sealed record DraftBody(string Kind, string Title, JsonElement Payload, i
 public sealed record CleanupAnswer(long ItemId, CleanupDecision Decision);
 public sealed record CleanupRuleAnswer(string Rule, string? Decision);
 public sealed record CleanupRun(string? BatchId, int? Take);
-public sealed record RepairRun(string OperationId, string ExpectedHash, bool Decided = false);
+public sealed record RepairRun(string OperationId, string ExpectedHash, bool Decided = false, string? Key = null, string? Choice = null);
 
 public partial class Program;

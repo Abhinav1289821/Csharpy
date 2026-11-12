@@ -35,6 +35,9 @@ public sealed class HqOptions
 
     public List<FirmOptions> Firms { get; set; } = [];
 
+    /// <summary>HQ's company-master database (ISTMAIN: companies, users, licence), read by data-health checks only.</summary>
+    public string? CompanyDatabase { get; set; }
+
     /// <summary>Previous capture app's ai-settings.json, imported once when this app has no AI settings yet.</summary>
     public string? ImportAiSettingsFrom { get; set; }
 

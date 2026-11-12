@@ -1,0 +1,487 @@
+[
+  {
+    "id": "TX01_HALF_SAVED_BILL",
+    "area": "transactions",
+    "title": "Sale/purchase bill saved only half-way (no ledger, VAT, charges or audit rows)",
+    "severity": "high",
+    "why": "HQ writes the bill header, party snapshot and every line while the operator is still typing (GrdItems_RowValidating -> Save_DocHeader/Save_DocDelv). Charges, VAT summary, ledger (IQDayBook), stock refresh and audit copies are written only when F10/Save completes. If HQ is killed, the PC loses power or the save throws, the bill stays: it appears in bill lists and reduces stock (UpdateClosing_Stock counts every line with a header) but never reaches the cash book, party ledger or GST ledgers.",
+    "detectSql": "SELECT h.Doc_Id, 'Half-saved ' + CASE WHEN h.Tt_Id IN (506,507) THEN 'sale ' ELSE 'purchase ' END + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ' for ' + CAST(CAST(h.Bill_Amt AS decimal(19,2)) AS varchar(24)) + ': missing' + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Delv x WHERE x.Doc_Id=h.Doc_Id) AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Recd x WHERE x.Doc_ID=h.Doc_Id) THEN ' lines' ELSE '' END + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.IQCash_TRAN c WHERE c.Doc_Id=h.Doc_Id) THEN ' party-snapshot' ELSE '' END + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.IQDOC_VAT v WHERE v.Doc_Id=h.Doc_Id) THEN ' VAT-summary' ELSE '' END + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Chrgs c WHERE c.Doc_id=h.Doc_Id) THEN ' charges' ELSE '' END + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.Doc_ID=h.Doc_Id) THEN ' ledger' ELSE '' END + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.User_IQDOC_Header u WHERE u.Doc_Id=h.Doc_Id) THEN ' audit' ELSE '' END AS Finding\nFROM dbo.IQDoc_Header h\nWHERE h.Tt_Id IN (500,501,506,507)\n  AND ( (NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Delv x WHERE x.Doc_Id=h.Doc_Id) AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Recd x WHERE x.Doc_ID=h.Doc_Id))\n     OR NOT EXISTS (SELECT 1 FROM dbo.IQCash_TRAN c WHERE c.Doc_Id=h.Doc_Id)\n     OR NOT EXISTS (SELECT 1 FROM dbo.IQDOC_VAT v WHERE v.Doc_Id=h.Doc_Id)\n     OR (ISNULL(h.Bill_Amt,0)<>0 AND NOT EXISTS (SELECT 1 FROM dbo.IQDayBook d WHERE d.Doc_ID=h.Doc_Id)) )",
+    "counts": {
+      "mbm": 2,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Half-saved sale CS/826 of 18/10/2026 for 900.00: missing VAT-summary charges ledger audit",
+      "MBM: Half-saved sale CS/76 of 25/04/2026 for 575.00: missing VAT-summary charges ledger audit"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner question per bill: \"Bill CS/76 (25/04/2026, Rs 575, sowkya recidency) and CS/826 (18/10/2026, Rs 900, y sathibabu) were never finished in HQ: the goods are counted as sold but the money is not in the cash book. Did these sales really happen? (a) yes -> we re-post each bill through HQ's own save path (engine amend with the stored lines: rewrites header, snapshot, charges incl. round-off -0.20 on CS/826, VAT summary, IQDayBook, stock refresh and audit copies), or (b) no -> we delete it with HQ's Outward_Delete and refresh stock for its items.\" Never repair automatically: CS/76 is before 1 Oct 2026 and both change the cash book."
+  },
+  {
+    "id": "TX02_HALF_SAVED_ORDER",
+    "area": "transactions",
+    "title": "Sales/purchase order saved only half-way (no charges or VAT summary rows)",
+    "severity": "low",
+    "why": "Same interrupted-save pattern as TX01 on estimates/orders: header, party snapshot and lines exist (their RecdOrDelv_ID is still 0, which HQ only fills on the final save) but the charge rows and the legacy IQDOC_VAT row that every finished order carries are missing. Orders post nothing to the ledger or stock, so the damage is limited to HQ screens/reports that join those rows and to our integrity check.",
+    "detectSql": "SELECT h.Doc_Id, 'Half-saved order ' + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ' for ' + CAST(CAST(h.Bill_Amt AS decimal(19,2)) AS varchar(24)) + ': missing' + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.IQOrd_Detail x WHERE x.Doc_ID=h.Doc_Id) THEN ' lines' ELSE '' END + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.IQDOC_VAT v WHERE v.Doc_Id=h.Doc_Id) THEN ' VAT-summary' ELSE '' END + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Chrgs c WHERE c.Doc_id=h.Doc_Id) THEN ' charges' ELSE '' END + CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.User_IQDOC_Header u WHERE u.Doc_Id=h.Doc_Id) THEN ' audit' ELSE '' END AS Finding\nFROM dbo.IQDoc_Header h\nWHERE h.Tt_Id IN (248,249) AND (NOT EXISTS (SELECT 1 FROM dbo.IQDOC_VAT v WHERE v.Doc_Id=h.Doc_Id) OR NOT EXISTS (SELECT 1 FROM dbo.IQOrd_Detail x WHERE x.Doc_ID=h.Doc_Id))",
+    "counts": {
+      "mbm": 21,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Half-saved order SO/313 of 26/09/2026 for 246.48: missing VAT-summary charges audit",
+      "MBM: Half-saved order SO/111 of 04/06/2026 for 159.50: missing VAT-summary charges audit",
+      "MBM: Half-saved order SO/137 of 16/06/2026 for 363.00: missing VAT-summary charges audit",
+      "MBM: Half-saved order SO/144 of 22/06/2026 for 82.02: missing VAT-summary charges audit",
+      "MBM: Half-saved order SO/164 of 09/07/2026 for 471.00: missing VAT-summary charges audit"
+    ],
+    "fix": "auto",
+    "fixSql": "-- Completes each half-saved order the way HQ's final save would: header totals from the lines, the firm's charge layout\n-- (copied from the latest finished order of the same type, all amounts 0 - orders never round), the zero VAT summary.\n-- Orders without any line are left for TX02 owner review (none today).\nDECLARE @doc int, @tt int, @net numeric(18,2);\nDECLARE c CURSOR LOCAL FAST_FORWARD FOR\n  SELECT h.Doc_Id, h.Tt_Id, (SELECT SUM(o.NetValue) FROM dbo.IQOrd_Detail o WHERE o.Doc_ID=h.Doc_Id)\n  FROM dbo.IQDoc_Header h\n  WHERE h.Tt_Id IN (248,249) AND NOT EXISTS (SELECT 1 FROM dbo.IQDOC_VAT v WHERE v.Doc_Id=h.Doc_Id)\n    AND EXISTS (SELECT 1 FROM dbo.IQOrd_Detail o WHERE o.Doc_ID=h.Doc_Id);\nOPEN c; FETCH NEXT FROM c INTO @doc, @tt, @net;\nWHILE @@FETCH_STATUS = 0\nBEGIN\n  UPDATE dbo.IQDoc_Header SET Product_Value=@net, Bill_Amt=@net, Supp_BillAmt=@net WHERE Doc_Id=@doc;\n  UPDATE dbo.IQOrd_Detail SET RecdOrDelv_ID=OrdDltdID WHERE Doc_ID=@doc AND ISNULL(RecdOrDelv_ID,0)=0;\n  IF NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Chrgs WHERE Doc_id=@doc)\n  BEGIN\n    DECLARE @ln int, @chrg int, @cidx tinyint, @act int, @calc numeric(18,4);\n    DECLARE k CURSOR LOCAL FAST_FORWARD FOR\n      SELECT t.Ln_No, t.Chrg_id, t.CIndx, t.Act_ID FROM dbo.IQDoc_Chrgs t\n      WHERE t.Doc_id=(SELECT MAX(x.Doc_Id) FROM dbo.IQDoc_Header x WHERE x.Tt_Id=@tt AND EXISTS (SELECT 1 FROM dbo.IQDOC_VAT v WHERE v.Doc_Id=x.Doc_Id) AND EXISTS (SELECT 1 FROM dbo.IQDoc_Chrgs y WHERE y.Doc_id=x.Doc_Id));\n    OPEN k; FETCH NEXT FROM k INTO @ln, @chrg, @cidx, @act;\n    WHILE @@FETCH_STATUS = 0\n    BEGIN\n      SET @calc = CASE WHEN @ln=1 THEN 0 ELSE @net END;\n      EXEC dbo.IQDoc_Chrgs_Insert @mDoc_id=@doc, @mLn_No=@ln, @mChrg_id=@chrg, @mCIndx=@cidx, @mRate=0, @mAmount=0, @mAct_ID=@act, @mChrg_Desc='', @mCalcOnAmt=@calc, @mTax5Amt=0, @mTax145Amt=0;\n      FETCH NEXT FROM k INTO @ln, @chrg, @cidx, @act;\n    END\n    CLOSE k; DEALLOCATE k;\n  END\n  EXEC dbo.IQDOC_VAT_Insert @mDoc_Id=@doc, @mExempted=0, @mGross4=0, @mTax4=0, @mGross145=0, @mTax145=0, @mGross1=0, @mTax1=0, @mTaxSpec=0, @mCashDisc=0, @mFrieght=0, @mCrDr_Note=0, @mRndOff=0;\n  FETCH NEXT FROM c INTO @doc, @tt, @net;\nEND\nCLOSE c; DEALLOCATE c;",
+    "fixNotes": "Deterministic, accounting-neutral (orders have no ledger or stock effect). Writes exactly the rows a finished HQ order carries: Bill_Amt/Product_Value = sum of lines (HQ Update_BillAmt), RecdOrDelv_ID = own line id (HQ final pass), the firm's charge rows with zero amounts (MBM 82/108/73, MP 73 - copied from the latest finished order of the same type) and the zero IQDOC_VAT row, all through HQ's own procedures. It does not invent User_IQ* audit copies: the audit log correctly shows the order was never finished; if a full HQ-identical re-save is wanted instead, run the engine amend (DocumentMutations.AmendAsync) with the stored lines. PO/1 (the only purchase order) gets just the VAT row because there is no finished purchase order to copy a charge layout from. Tested in a rolled-back transaction: MBM 21 -> 0, MP 0 -> 0; TX03 and TX24 stay clean afterwards."
+  },
+  {
+    "id": "TX03_LINES_CHANGED_AFTER_SAVE",
+    "area": "transactions",
+    "title": "Bill lines no longer add up to the saved bill total (lines edited after the last full save)",
+    "severity": "high",
+    "why": "HQ re-saves a line the moment the cursor leaves its grid row, even while re-opening an already saved bill. If the operator changed a rate/qty or added lines and the final save never ran, the lines carry the new values while the header total, round-off and IQDayBook ledger keep the old ones. The printed bill, GST returns (built from lines) and books (built from the ledger) then disagree. The last full save is recoverable from the User_IQDOC_* audit copy whose line total equals the header.",
+    "detectSql": "SELECT h.Doc_Id, CASE WHEN h.Tt_Id IN (248,249) THEN 'Order ' WHEN h.Tt_Id IN (506,507) THEN 'Sale ' ELSE 'Purchase ' END + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ': lines total ' + CAST(CAST(l.net AS decimal(19,2)) AS varchar(24)) + ' but the bill was saved at ' + CAST(CAST(h.Product_Value AS decimal(19,2)) AS varchar(24)) + ' + charges ' + CAST(CAST(ISNULL(c.amt,0) AS decimal(19,2)) AS varchar(24)) + ' = ' + CAST(CAST(h.Bill_Amt AS decimal(19,2)) AS varchar(24)) AS Finding\nFROM dbo.IQDoc_Header h\nCROSS APPLY (SELECT SUM(x.NetValue) net FROM (SELECT Doc_Id, NetValue FROM dbo.IQDoc_Delv UNION ALL SELECT Doc_ID, NetValue FROM dbo.IQDoc_Recd UNION ALL SELECT Doc_ID, NetValue FROM dbo.IQOrd_Detail) x WHERE x.Doc_Id=h.Doc_Id) l\nOUTER APPLY (SELECT SUM(ch.Amount) amt FROM dbo.IQDoc_Chrgs ch WHERE ch.Doc_id=h.Doc_Id) c\nWHERE h.Tt_Id IN (248,249,500,501,506,507)\n  AND EXISTS (SELECT 1 FROM dbo.IQDOC_VAT v WHERE v.Doc_Id=h.Doc_Id)\n  AND (ABS(ISNULL(h.Bill_Amt,0)-ISNULL(l.net,0)-ISNULL(c.amt,0))>0.005 OR (h.Tt_Id NOT IN (248,249) AND ABS(ISNULL(h.Product_Value,0)-ISNULL(l.net,0))>0.005))",
+    "counts": {
+      "mbm": 7,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Purchase GSTPUR/36 of 08/05/2026: lines total 8150.03 but the bill was saved at 8149.79 + charges 0.21 = 8150.00",
+      "MBM: Purchase GSTPUR/48 of 15/05/2026: lines total 8359.64 but the bill was saved at 8359.60 + charges 0.40 = 8360.00",
+      "MBM: Purchase GSTPUR/129 of 07/07/2026: lines total 26705.50 but the bill was saved at 26706.12 + charges -0.12 = 26706.00",
+      "MBM: Purchase GSTPUR/139 of 17/07/2026: lines total 11000.32 but the bill was saved at 10999.37 + charges -0.37 = 10999.00",
+      "MBM: Purchase GSTPUR/152 of 31/07/2026: lines total 7199.89 but the bill was saved at 7199.77 + charges 0.23 = 7200.00"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner question per bill: \"On GSTPUR/36, /48, /129, /139, /152 (May-Jul), CS/753 (05/10/2026) and estimate SO/273 the item lines were changed after the bill was saved, but the total and the accounts kept the old figure. Which is right: (a) the saved total (we put the lines back exactly as the last completed save recorded them in HQ's change log), or (b) the new lines (we re-save the bill through HQ's edit path, which changes the total, round-off and ledger)?\" Default suggestion: (a) for the five purchases (differences are paise-level rate decimals, e.g. 30.08 -> 30.084, and the supplier invoice total is fixed) and for CS/753 (line 6 rate 38.00 -> 38.14 changed the line by Rs 11.38 after printing). Either way the change goes through the engine amend path (lines updated in place by HQ's IQDoc_Delv_insert/IQDoc_Recd_insert, stock refreshed); all but CS/753 predate 1 Oct 2026."
+  },
+  {
+    "id": "TX04_DUPLICATE_LINE_NO_OPEN",
+    "area": "transactions",
+    "title": "Two lines of one order (or of a bill dated on/after 1 Oct 2026) share the same line number",
+    "severity": "low",
+    "why": "Rows inserted in the middle of HQ's grid during an edit are autosaved with the neighbour's number. Totals are unaffected, but print order is unstable and anything that addresses a line by (Doc_Id, Ln_No) - HQ's own audit copy and our engine's CopyRowsStep - picks up two rows.",
+    "detectSql": "SELECT z.Doc_Id, CASE WHEN h.Tt_Id IN (248,249) THEN 'Order ' WHEN h.Tt_Id IN (506,507) THEN 'Sale ' ELSE 'Purchase ' END + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ': line number ' + CAST(z.Ln_no AS varchar(6)) + ' used ' + CAST(z.n AS varchar(6)) + ' times' AS Finding\nFROM (SELECT Doc_Id, Ln_no, COUNT(*) n FROM dbo.IQDoc_Delv GROUP BY Doc_Id, Ln_no HAVING COUNT(*)>1\n      UNION ALL SELECT Doc_ID, Ln_no, COUNT(*) FROM dbo.IQDoc_Recd GROUP BY Doc_ID, Ln_no HAVING COUNT(*)>1\n      UNION ALL SELECT Doc_ID, Ln_No, COUNT(*) FROM dbo.IQOrd_Detail GROUP BY Doc_ID, Ln_No HAVING COUNT(*)>1) z\nJOIN dbo.IQDoc_Header h ON h.Doc_Id=z.Doc_Id\nWHERE h.Tt_Id IN (248,249) OR h.Doc_Date>='20261001'",
+    "counts": {
+      "mbm": 22,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Order SO/97 of 31/05/2026: line number 4 used 2 times",
+      "MBM: Order SO/107 of 02/06/2026: line number 5 used 2 times",
+      "MBM: Order SO/109 of 03/06/2026: line number 23 used 2 times",
+      "MBM: Order SO/131 of 11/06/2026: line number 8 used 2 times",
+      "MBM: Order SO/135 of 14/06/2026: line number 29 used 2 times"
+    ],
+    "fix": "auto",
+    "fixSql": "-- Renumber 1..n in display order (Ln_No, then line id), as HQ does when it re-saves the grid. Amounts untouched.\nUPDATE x SET Ln_No=x.rn FROM (SELECT o.Ln_No, ROW_NUMBER() OVER (PARTITION BY o.Doc_ID ORDER BY o.Ln_No, o.OrdDltdID) rn FROM dbo.IQOrd_Detail o\n  WHERE o.Doc_ID IN (SELECT Doc_ID FROM dbo.IQOrd_Detail GROUP BY Doc_ID, Ln_No HAVING COUNT(*)>1)) x WHERE x.Ln_No<>x.rn;\nUPDATE x SET Ln_no=x.rn FROM (SELECT d.Ln_no, ROW_NUMBER() OVER (PARTITION BY d.Doc_Id ORDER BY d.Ln_no, d.Delv_Id) rn FROM dbo.IQDoc_Delv d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_Id\n  WHERE h.Doc_Date>='20261001' AND d.Doc_Id IN (SELECT Doc_Id FROM dbo.IQDoc_Delv GROUP BY Doc_Id, Ln_no HAVING COUNT(*)>1)) x WHERE x.Ln_no<>x.rn;\nUPDATE x SET Ln_no=x.rn FROM (SELECT r.Ln_no, ROW_NUMBER() OVER (PARTITION BY r.Doc_ID ORDER BY r.Ln_no, r.Recd_Id) rn FROM dbo.IQDoc_Recd r JOIN dbo.IQDoc_Header h ON h.Doc_Id=r.Doc_ID\n  WHERE h.Tt_Id<>222 AND h.Doc_Date>='20261001' AND r.Doc_ID IN (SELECT Doc_ID FROM dbo.IQDoc_Recd GROUP BY Doc_ID, Ln_no HAVING COUNT(*)>1)) x WHERE x.Ln_no<>x.rn;",
+    "fixNotes": "Only the line-number column changes; no amount, ledger or stock effect. Restricted to orders and to bills dated on/after 1 Oct 2026; older posted bills are TX05. Tested in a rolled-back transaction: MBM 22 -> 0, MP 0."
+  },
+  {
+    "id": "TX05_DUPLICATE_LINE_NO_POSTED",
+    "area": "transactions",
+    "title": "Two lines of a posted bill dated before 1 Oct 2026 share the same line number",
+    "severity": "low",
+    "why": "Same cause as TX04, on bills that are already in filed GST periods; renumbering is harmless to totals but touches posted bills, which needs the owner's consent.",
+    "detectSql": "SELECT z.Doc_Id, CASE WHEN h.Tt_Id IN (506,507) THEN 'Sale ' ELSE 'Purchase ' END + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ': line number ' + CAST(z.Ln_no AS varchar(6)) + ' used ' + CAST(z.n AS varchar(6)) + ' times' AS Finding\nFROM (SELECT Doc_Id, Ln_no, COUNT(*) n FROM dbo.IQDoc_Delv GROUP BY Doc_Id, Ln_no HAVING COUNT(*)>1\n      UNION ALL SELECT Doc_ID, Ln_no, COUNT(*) FROM dbo.IQDoc_Recd GROUP BY Doc_ID, Ln_no HAVING COUNT(*)>1) z\nJOIN dbo.IQDoc_Header h ON h.Doc_Id=z.Doc_Id\nWHERE h.Tt_Id NOT IN (248,249) AND h.Doc_Date<'20261001'",
+    "counts": {
+      "mbm": 9,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Sale CS/711 of 26/09/2026: line number 51 used 2 times",
+      "MBM: Sale CS/451 of 24/07/2026: line number 4 used 2 times",
+      "MBM: Purchase GSTPUR/117 of 06/07/2026: line number 7 used 2 times",
+      "MBM: Purchase GSTPUR/180 of 14/08/2026: line number 5 used 2 times",
+      "MBM: Purchase GSTPUR/171 of 08/08/2026: line number 4 used 2 times"
+    ],
+    "fix": "owner",
+    "fixSql": "UPDATE x SET Ln_no=x.rn FROM (SELECT d.Ln_no, ROW_NUMBER() OVER (PARTITION BY d.Doc_Id ORDER BY d.Ln_no, d.Delv_Id) rn FROM dbo.IQDoc_Delv d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_Id\n  WHERE h.Doc_Date<'20261001' AND d.Doc_Id IN (SELECT Doc_Id FROM dbo.IQDoc_Delv GROUP BY Doc_Id, Ln_no HAVING COUNT(*)>1)) x WHERE x.Ln_no<>x.rn;\nUPDATE x SET Ln_no=x.rn FROM (SELECT r.Ln_no, ROW_NUMBER() OVER (PARTITION BY r.Doc_ID ORDER BY r.Ln_no, r.Recd_Id) rn FROM dbo.IQDoc_Recd r JOIN dbo.IQDoc_Header h ON h.Doc_Id=r.Doc_ID\n  WHERE h.Tt_Id<>222 AND h.Doc_Date<'20261001' AND r.Doc_ID IN (SELECT Doc_ID FROM dbo.IQDoc_Recd GROUP BY Doc_ID, Ln_no HAVING COUNT(*)>1)) x WHERE x.Ln_no<>x.rn;",
+    "fixNotes": "Owner question: \"Eight sale/purchase bills from Jun-Sep 2026 have two items printed under the same line number (amounts are correct). May we renumber their lines 1..n? Nothing else on the bills changes.\" Run the fixSql on yes."
+  },
+  {
+    "id": "TX06_ORDER_SUPPLIED_TWICE",
+    "area": "transactions",
+    "title": "Estimate/order lines converted into more than one sale, or into a sale for a different party",
+    "severity": "medium",
+    "why": "A sale line remembers the order line it came from (IQDoc_Delv.OrdDelv_Id). The same order line is linked from two sale bills, or from a bill of an unrelated (non-cash) customer. HQ's pending-order and order-vs-supply reports then double count, and the risk is that one of the two sales is a duplicate bill.",
+    "detectSql": "SELECT d.Doc_Id, 'Sale ' + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' (' + CONVERT(char(10),h.Doc_Date,103) + ') takes ' + CAST(COUNT(*) AS varchar(6)) + ' line(s) from order ' + RTRIM(oh.TSeries)+'/'+CAST(oh.TNo AS varchar(12)) + CASE WHEN MAX(CASE WHEN s.cnt>1 THEN 1 ELSE 0 END)=1 THEN ' that another sale also supplied' ELSE '' END + CASE WHEN oh.HeadAct_ID<>h.HeadAct_ID AND oh.HeadAct_ID<>6 AND h.HeadAct_ID<>6 THEN ' (order is for a different party)' ELSE '' END AS Finding\nFROM dbo.IQDoc_Delv d\nJOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_Id\nJOIN dbo.IQOrd_Detail o ON o.OrdDltdID=d.OrdDelv_Id\nJOIN dbo.IQDoc_Header oh ON oh.Doc_Id=o.Doc_ID\nCROSS APPLY (SELECT COUNT(DISTINCT x.Doc_Id) cnt FROM dbo.IQDoc_Delv x WHERE x.OrdDelv_Id=o.OrdDltdID) s\nWHERE s.cnt>1 OR (oh.HeadAct_ID<>h.HeadAct_ID AND oh.HeadAct_ID<>6 AND h.HeadAct_ID<>6)\nGROUP BY d.Doc_Id, h.TSeries, h.TNo, h.TExtn, h.Doc_Date, h.HeadAct_ID, oh.Doc_Id, oh.TSeries, oh.TNo, oh.HeadAct_ID",
+    "counts": {
+      "mbm": 18,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Sale CS/285 (13/06/2026) takes 1 line(s) from order SO/127 (order is for a different party)",
+      "MBM: Sale CS/314 (22/06/2026) takes 68 line(s) from order SO/135 that another sale also supplied (order is for a different party)",
+      "MBM: Sale CS/315 (22/06/2026) takes 68 line(s) from order SO/135 that another sale also supplied",
+      "MBM: Sale CS/424 (19/07/2026) takes 17 line(s) from order SO/178 (order is for a different party)",
+      "MBM: Sale CS/479 (31/07/2026) takes 28 line(s) from order SO/194 (order is for a different party)"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner questions: \"Estimate SO/135 (Kondabbu events, Rs 50,386) was turned into both CS/314 (Krishana garu (hotel), Rs 1,82,499) and CS/315 (Kondabbu events, Rs 1,61,660) on 22/06/2026; four Sparkle Steels estimates (SO/220, 229, 245, 251) were turned into both CS/598 (K Ramarao garu, cash) and CS/629 (Sparkle Steels). Are both bills of each pair genuine and separate sales?\" If yes and the link is just wrong, the repair is to clear OrdDelv_Id on the lines of the wrong bill (CS/314, CS/598) so the order shows as supplied once - a change to posted June/August bills, so only on the owner's word. In all, 18 findings (one per sale bill and order): 10 for the two double-supply groups and 8 for bills of a non-cash customer made from another non-cash customer estimate (CS/285, 424, 479, 496, 583, 746, 764, 774; some may be harmless, e.g. estimate under the contractor, bill under the house owner). Quantity larger than ordered on a single supply (SO/178, 210, 284, 309, 343, 367) is normal shop practice (estimate edited at billing) and is not flagged."
+  },
+  {
+    "id": "TX07_STOCK_DRIFT",
+    "area": "transactions",
+    "title": "IQItems_Mast.Stk differs from HQ's own stock formula",
+    "severity": "medium",
+    "why": "HQ stores the item's current stock in IQItems_Mast.Stk and refreshes it with [UpdateClosing_Stock_B+NG] only for the items of a bill being saved. Three HQ paths change movements without that refresh: Outward_Delete/Inward_Delete (they only clear Cost_Calculated), removing a line while editing a bill (the removed item is no longer on the bill, so it is not refreshed), and opening-stock entries (OPSTK, Tt 222, regenerated around early June and OPSTK/23 edited on 07/07/2026). Items whose every movement was deleted keep their last figure because the procedure only updates items that still have movements. Stock screens, low-stock lists and our price/stock views show the stale number.",
+    "detectSql": "SELECT im.Item_ID, CASE WHEN e.Item_ID IS NULL THEN 'Stock ' + CAST(CAST(im.Stk AS decimal(19,2)) AS varchar(24)) + ' on an item with no stock movements (HQ recalculation gives 0)' ELSE 'Stock ' + CAST(CAST(im.Stk AS decimal(19,2)) AS varchar(24)) + ' but HQ recalculation gives ' + CAST(CAST(e.expStk AS decimal(19,2)) AS varchar(24)) END + ': ' + LTRIM(RTRIM(im.Item_Name)) AS Finding\nFROM dbo.IQItems_Mast im\nLEFT JOIN (SELECT tb.Item_ID, CASE WHEN ISNULL(iu.StockConv,0)=0 THEN SUM(tb.q) ELSE SUM(tb.q)/dbo.zero2one(ISNULL(iu.IssueConv,0)) END expStk\n  FROM (SELECT r.Item_ID, CASE WHEN ISNULL(r.Stockconv,0)=1 THEN (ISNULL(r.Qty,0)+ISNULL(r.Free,0))*ISNULL(u.IssueConv,0) ELSE ISNULL(r.Qty,0)+ISNULL(r.Free,0) END q\n        FROM dbo.IQDoc_Recd r JOIN dbo.IQDoc_Header h ON h.Doc_Id=r.Doc_ID JOIN dbo.IQItems_Units u ON u.Item_ID=r.Item_ID WHERE ISNULL(r.DCRecd_Id,0)=0\n        UNION ALL\n        SELECT d.Item_ID, -(CASE WHEN ISNULL(d.Stockconv,0)=1 THEN (ISNULL(d.Qty,0)+ISNULL(d.Free,0))*ISNULL(u.IssueConv,0) ELSE ISNULL(d.Qty,0)+ISNULL(d.Free,0) END)\n        FROM dbo.IQDoc_Delv d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_Id JOIN dbo.IQItems_Units u ON u.Item_ID=d.Item_ID WHERE ISNULL(d.DCDelv_Id,0)=0) tb\n  JOIN dbo.IQItems_Units iu ON iu.Item_ID=tb.Item_ID GROUP BY tb.Item_ID, iu.StockConv, iu.IssueConv) e ON e.Item_ID=im.Item_ID\nWHERE (e.Item_ID IS NULL AND ISNULL(im.Stk,0)<>0) OR (e.Item_ID IS NOT NULL AND ABS(ISNULL(im.Stk,0)-e.expStk)>=0.005)",
+    "counts": {
+      "mbm": 76,
+      "mp": 4
+    },
+    "examples": [
+      "MBM: Stock 9.00 but HQ recalculation gives 15.00: Sh s seler 1 ltr",
+      "MBM: Stock -5.00 but HQ recalculation gives -3.00: M 8 MODULAR PLATE",
+      "MBM: Stock 5.00 but HQ recalculation gives 7.00: 20 MM GI TEE (3/4\")",
+      "MBM: Stock -30.00 but HQ recalculation gives -29.00: 25 MM GI TEE(1\")",
+      "MBM: Stock -4.00 but HQ recalculation gives -2.00: 15 MM GI X NIPPLE (1/2\")"
+    ],
+    "fix": "auto",
+    "fixSql": "-- Exactly HQ's menu \"Update ClosingStock to Items List\" (Mainfrm -> mdlGeneral.UpdateStock(0, cn, AllItemsUpdate:=True)).\nUPDATE dbo.IQItems_Mast SET Stk=0;\nEXEC dbo.[UpdateClosing_Stock_B+NG] @mItem_ID=0;",
+    "fixNotes": "HQ-identical: the two statements are what HQ itself runs from Inventory > \"Update ClosingStock to Items List\". Touches only the derived Stk column; no document changes. Tested in a rolled-back transaction: MBM 76 -> 0 (66 drifted + 10 stale no-movement items), MP 4 -> 0. Root-cause split (MBM): 6 items explained exactly by deleted bills (e.g. item 548 +12 from deleted GSTPUR, item 2068 +12), 1 by a line removed from CS/759 (item 246), the rest by opening-stock regeneration/edit without refresh (e.g. item 883 HINGES PCCOATED 213 vs 27-, item 1501 NO 3 JALLY 115 vs -5). Prevention: our engine already refreshes removed items (DocumentMutations StockSteps with clearEmpty); re-run this after any HQ delete."
+  },
+  {
+    "id": "TX08_NEGATIVE_STOCK",
+    "area": "transactions",
+    "title": "Items whose stock (by HQ's formula) is negative",
+    "severity": "medium",
+    "why": "Negative stock means more was sold than was ever received in this year's books. Here it is overwhelmingly inherited: the new-year carry-forward copied last year's negative closing balances into opening stock (TX09), and many items are sold without a purchase entry (loose/cut items, items bought on another firm's bill). It makes stock value, reorder lists and margin reports meaningless for those items.",
+    "detectSql": "SELECT im.Item_ID, 'Stock ' + CAST(CAST(e.expStk AS decimal(19,2)) AS varchar(24)) + ' (' + CASE WHEN op.q<0 AND ISNULL(pu.q,0)=0 THEN 'negative opening stock, no purchase this year' WHEN op.q<0 THEN 'negative opening stock' WHEN ISNULL(op.q,0)=0 AND ISNULL(pu.q,0)=0 THEN 'sold but never received: no opening stock, no purchase' WHEN ISNULL(pu.q,0)=0 THEN 'sold more than opening stock, no purchase' ELSE 'sold more than opening + purchases' END + '): ' + LTRIM(RTRIM(im.Item_Name)) AS Finding\nFROM dbo.IQItems_Mast im\nJOIN (SELECT tb.Item_ID, CASE WHEN ISNULL(iu.StockConv,0)=0 THEN SUM(tb.q) ELSE SUM(tb.q)/dbo.zero2one(ISNULL(iu.IssueConv,0)) END expStk\n  FROM (SELECT r.Item_ID, CASE WHEN ISNULL(r.Stockconv,0)=1 THEN (ISNULL(r.Qty,0)+ISNULL(r.Free,0))*ISNULL(u.IssueConv,0) ELSE ISNULL(r.Qty,0)+ISNULL(r.Free,0) END q\n        FROM dbo.IQDoc_Recd r JOIN dbo.IQDoc_Header h ON h.Doc_Id=r.Doc_ID JOIN dbo.IQItems_Units u ON u.Item_ID=r.Item_ID WHERE ISNULL(r.DCRecd_Id,0)=0\n        UNION ALL\n        SELECT d.Item_ID, -(CASE WHEN ISNULL(d.Stockconv,0)=1 THEN (ISNULL(d.Qty,0)+ISNULL(d.Free,0))*ISNULL(u.IssueConv,0) ELSE ISNULL(d.Qty,0)+ISNULL(d.Free,0) END)\n        FROM dbo.IQDoc_Delv d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_Id JOIN dbo.IQItems_Units u ON u.Item_ID=d.Item_ID WHERE ISNULL(d.DCDelv_Id,0)=0) tb\n  JOIN dbo.IQItems_Units iu ON iu.Item_ID=tb.Item_ID GROUP BY tb.Item_ID, iu.StockConv, iu.IssueConv) e ON e.Item_ID=im.Item_ID\nOUTER APPLY (SELECT SUM(r.Qty) q FROM dbo.IQDoc_Recd r JOIN dbo.IQDoc_Header h ON h.Doc_Id=r.Doc_ID WHERE h.Tt_Id=222 AND r.Item_ID=im.Item_ID) op\nOUTER APPLY (SELECT SUM(r.Qty) q FROM dbo.IQDoc_Recd r JOIN dbo.IQDoc_Header h ON h.Doc_Id=r.Doc_ID WHERE h.Tt_Id IN (500,501) AND r.Item_ID=im.Item_ID) pu\nWHERE e.expStk<0",
+    "counts": {
+      "mbm": 723,
+      "mp": 48
+    },
+    "examples": [
+      "MBM: Stock -43.00 (negative opening stock, no purchase this year): M 16 AMP 3 PIN SOCKET",
+      "MBM: Stock -1.00 (negative opening stock, no purchase this year): 3 M METEAL BOX",
+      "MBM: Stock -2.00 (negative opening stock, no purchase this year): M 6 AMP 3 PIN SOCKET",
+      "MBM: Stock -6.00 (negative opening stock, no purchase this year): 40 MM GI ELBOW",
+      "MBM: Stock -9.00 (negative opening stock, no purchase this year): 15 MM GI TEE (1/2\")"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner question: \"723 items (MBM; 48 in MP) show negative stock - 580 of them only because last year's negative balance was carried into this year's opening stock and nothing was bought since. Do you want stock tracked for these items? If yes we need a physical count to post as opening stock; if not, we can zero the negative opening lines (TX09) so stock starts from 0.\" Not automatable: the true quantity on the shelf is unknown."
+  },
+  {
+    "id": "TX09_NEGATIVE_OPENING_STOCK",
+    "area": "transactions",
+    "title": "Opening-stock entries (Tt 222) carrying negative quantities from last year",
+    "severity": "medium",
+    "why": "HQ's new-year tool (ClsNewFY.UpdateClosingStock) copies every item's closing stock, negatives included, into OPSTK documents dated 31/03/2026, with rate 0 for the negative ones. A negative opening quantity is physically impossible and is the main source of TX08.",
+    "detectSql": "SELECT r.Item_ID, 'Opening stock ' + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' line ' + CAST(r.Ln_no AS varchar(6)) + ': quantity ' + CAST(CAST(r.Qty AS decimal(19,2)) AS varchar(24)) + ' for ' + LTRIM(RTRIM(ISNULL(im.Item_Name,'#'+CAST(r.Item_ID AS varchar(12))))) AS Finding\nFROM dbo.IQDoc_Recd r JOIN dbo.IQDoc_Header h ON h.Doc_Id=r.Doc_ID LEFT JOIN dbo.IQItems_Mast im ON im.Item_ID=r.Item_ID\nWHERE h.Tt_Id=222 AND r.Qty<0",
+    "counts": {
+      "mbm": 749,
+      "mp": 47
+    },
+    "examples": [
+      "MBM: Opening stock OPSTK/1 line 11: quantity -1.00 for M 6 AMP 3 PIN SOCKET",
+      "MBM: Opening stock OPSTK/1 line 13: quantity -4.00 for M 16 AMP 3 PIN SOCKET",
+      "MBM: Opening stock OPSTK/1 line 15: quantity -2.00 for 1OR 2 METAL BOX",
+      "MBM: Opening stock OPSTK/1 line 16: quantity -1.00 for 3 M METEAL BOX",
+      "MBM: Opening stock OPSTK/1 line 17: quantity -1.00 for 4 M METAL BOX"
+    ],
+    "fix": "owner",
+    "fixSql": "-- Only on the owner's yes: zero the impossible negative opening quantities, then refresh stock exactly as HQ's menu does.\nUPDATE r SET Qty=0, Value=0, GrossValue=0, NetValue=0 FROM dbo.IQDoc_Recd r JOIN dbo.IQDoc_Header h ON h.Doc_Id=r.Doc_ID WHERE h.Tt_Id=222 AND r.Qty<0;\nUPDATE h SET Bill_Amt=(SELECT SUM(x.NetValue) FROM dbo.IQDoc_Recd x WHERE x.Doc_ID=h.Doc_Id) FROM dbo.IQDoc_Header h WHERE h.Tt_Id=222;\nUPDATE dbo.IQItems_Mast SET Stk=0;\nEXEC dbo.[UpdateClosing_Stock_B+NG] @mItem_ID=0;",
+    "fixNotes": "Changes the year's opening stock (stock valuation and every item's stock), so owner decision. Alternative the owner may prefer: enter a physical count through HQ's opening-stock screen. Negative lines have rate 0, so opening stock value (Bill_Amt of the OPSTK documents) does not change."
+  },
+  {
+    "id": "TX10_OPENING_STOCK_IRREGULAR",
+    "area": "transactions",
+    "title": "Opening-stock documents dated other than 31/03/2026, duplicated per item, or with header/line totals that disagree",
+    "severity": "info",
+    "why": "Opening stock must be one line per item, dated the last day of the previous year (HQ's convention - it is deliberately outside 01/04/2026-31/03/2027). A second line for the same item or a stray date would double or misplace the opening quantity.",
+    "detectSql": "SELECT h.Doc_Id, 'Opening stock ' + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' dated ' + CONVERT(char(10),h.Doc_Date,103) + ' (expected 31/03/2026)' AS Finding FROM dbo.IQDoc_Header h WHERE h.Tt_Id=222 AND h.Doc_Date<>'20260331'\nUNION ALL\nSELECT MIN(r.Doc_ID), 'Item ' + CAST(r.Item_ID AS varchar(12)) + ' appears on ' + CAST(COUNT(*) AS varchar(6)) + ' opening-stock lines' FROM dbo.IQDoc_Recd r JOIN dbo.IQDoc_Header h ON h.Doc_Id=r.Doc_ID WHERE h.Tt_Id=222 GROUP BY r.Item_ID HAVING COUNT(*)>1\nUNION ALL\nSELECT h.Doc_Id, 'Opening stock ' + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ': value ' + CAST(CAST(h.Bill_Amt AS decimal(19,2)) AS varchar(24)) + ' but lines total ' + CAST(CAST((SELECT SUM(x.NetValue) FROM dbo.IQDoc_Recd x WHERE x.Doc_ID=h.Doc_Id) AS decimal(19,2)) AS varchar(24)) FROM dbo.IQDoc_Header h WHERE h.Tt_Id=222 AND ABS(ISNULL(h.Bill_Amt,0)-ISNULL((SELECT SUM(x.NetValue) FROM dbo.IQDoc_Recd x WHERE x.Doc_ID=h.Doc_Id),0))>0.005",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Guard check: 0 on both firms today (MBM OPSTK/1-31, MP OPSTK/1-7, all dated 31/03/2026, one line per item). Note: the OPSTK documents were created about early June (Doc_Id 8771-8801 sit between June bills) although Ent_Date says 01/04/2026 - the carry-forward was re-run, which is one cause of TX07."
+  },
+  {
+    "id": "TX11_BILL_TIME_12H",
+    "area": "transactions",
+    "title": "Bill_Time / Ent_Time stored in 12-hour format (written by the MK-CORE prototype)",
+    "severity": "low",
+    "why": "HQ always stores Bill_Time and Ent_Time as 24-hour \"HH:mm:ss\". Seven MBM documents written by the old TypeScript prototype (BillEnteredSystem = MK-CORE, 2-10 Nov 2026) store \"7:16:48 PM\". Reports that sort or parse the time misorder them and the new engine's parity checks reject them.",
+    "detectSql": "SELECT h.Doc_Id, RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ' has Bill_Time ''' + ISNULL(h.Bill_Time,'') + ''' (written by ' + ISNULL(h.BillEnteredSystem,'?') + ')' AS Finding\nFROM dbo.IQDoc_Header h\nWHERE ISNULL(h.Bill_Time,'')<>'' AND h.Bill_Time NOT LIKE '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]'",
+    "counts": {
+      "mbm": 7,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: SO/392 of 24/10/2026 has Bill_Time '7:16:48 PM' (written by MK-CORE)",
+      "MBM: GSTPUR/272 of 19/08/2026 has Bill_Time '6:15:04 PM' (written by MK-CORE)",
+      "MBM: GSTPUR/273 of 13/10/2026 has Bill_Time '6:24:16 PM' (written by MK-CORE)",
+      "MBM: SO/428 of 07/11/2026 has Bill_Time '2:19:41 PM' (written by MK-CORE)",
+      "MBM: GSTPUR/304 of 02/11/2026 has Bill_Time '12:50:48 PM' (written by MK-CORE)"
+    ],
+    "fix": "auto",
+    "fixSql": "UPDATE dbo.IQDoc_Header SET Bill_Time=CONVERT(char(8), CAST(Bill_Time AS time), 108) WHERE ISNULL(Bill_Time,'')<>'' AND Bill_Time NOT LIKE '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND TRY_CAST(Bill_Time AS time) IS NOT NULL;\nUPDATE dbo.User_IQDOC_Header SET Bill_Time=CONVERT(char(8), CAST(Bill_Time AS time), 108) WHERE ISNULL(Bill_Time,'')<>'' AND Bill_Time NOT LIKE '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND TRY_CAST(Bill_Time AS time) IS NOT NULL;",
+    "fixNotes": "Same instant, HQ's format; no amount, ledger or stock change. One affected document (GSTPUR/272) is dated 19/08/2026, but the field is a formatting artefact of our own prototype write, not posted bill content, so it is treated as auto; exclude Doc_Date < 01/10/2026 if the owner wants zero touches on old bills. The other MK-CORE documents should be re-verified by ReplayParityTests-style column diff (see transactions.md). Tested in a rolled-back transaction: MBM 7 -> 0."
+  },
+  {
+    "id": "TX12_RENUMBERED_BILL",
+    "area": "transactions",
+    "title": "Bill number changed after saving, outside its series, or repeated with a suffix",
+    "severity": "high",
+    "why": "The invoice number printed for the customer and reported in GSTR-1 must be unique and stable in its series. These bills were re-numbered in HQ's edit screen after they were first saved (HQ's change log shows the original number), moved to a series other than the type's own, or reuse a number already taken by another bill and are told apart only by a suffix.",
+    "detectSql": "SELECT h.Doc_Id, CASE WHEN h.Tt_Id IN (506,507) THEN 'Sale ' ELSE 'Purchase ' END + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ' (' + CAST(CAST(h.Bill_Amt AS decimal(19,2)) AS varchar(24)) + ')' + CASE WHEN f.TSeries IS NOT NULL AND (RTRIM(f.TSeries)<>RTRIM(h.TSeries) OR f.TNo<>h.TNo) THEN ': first saved as ' + RTRIM(f.TSeries)+'/'+CAST(f.TNo AS varchar(12)) ELSE '' END + CASE WHEN RTRIM(h.TSeries)<>RTRIM(ISNULL(t.Series,'')) THEN ': series is not the type''s own (' + RTRIM(ISNULL(t.Series,'')) + ')' ELSE '' END + CASE WHEN EXISTS (SELECT 1 FROM dbo.IQDoc_Header o WHERE o.Tt_Id=h.Tt_Id AND o.Doc_Id<>h.Doc_Id AND RTRIM(o.TSeries)=RTRIM(h.TSeries) AND o.TNo=h.TNo) THEN ': number also used by another bill' ELSE '' END AS Finding\nFROM dbo.IQDoc_Header h\nLEFT JOIN dbo.TTypes t ON t.TT_ID=h.Tt_Id\nOUTER APPLY (SELECT TOP 1 u.TSeries, u.TNo FROM dbo.User_IQDOC_Header u WHERE u.Doc_Id=h.Doc_Id ORDER BY u.ModifyCnt) f\nWHERE h.Tt_Id IN (500,501,506,507)\n  AND ( (f.TSeries IS NOT NULL AND (RTRIM(f.TSeries)<>RTRIM(h.TSeries) OR f.TNo<>h.TNo))\n     OR RTRIM(h.TSeries)<>RTRIM(ISNULL(t.Series,''))\n     OR EXISTS (SELECT 1 FROM dbo.IQDoc_Header o WHERE o.Tt_Id=h.Tt_Id AND o.Doc_Id<>h.Doc_Id AND RTRIM(o.TSeries)=RTRIM(h.TSeries) AND o.TNo=h.TNo) )",
+    "counts": {
+      "mbm": 4,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: Sale CS/3261 of 23/06/2026 (620.00): first saved as A/1: number also used by another bill",
+      "MBM: Sale CS/326 of 22/06/2026 (90998.00): number also used by another bill",
+      "MBM: Sale 1/1 of 15/09/2026 (750.00): first saved as CS/665: series is not the type's own (CS)",
+      "MBM: Sale CS/750 of 05/10/2026 (2450.00): first saved as CS/747",
+      "MP: Sale GS/140 of 30/10/2026 (10770.10): first saved as GS/144"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner questions: (1) \"Bill 1/1 of 15/09/2026 (Rs 750) was saved as CS/665 and changed to series '1' number 1 on 09/10/2026. CS/665 is now a hole in the sales series. May we put it back to CS/665?\" (2) \"Bill CS/326 suffix 1 of 23/06/2026 (Rs 620, Srilalitha Enterprises) was first A/1, then CS/469, CS/470, and finally CS/326 - a number that CS/326 of 22/06/2026 (Rs 90,998) already has. Which number did the customer get, and which number was reported in GSTR-1?\" Repair on the owner's answer is the engine amend path with the agreed series/number (rewrites header and IQDayBook Tseries/Tno together). Both bills predate 1 Oct 2026 and are in filed GST periods. (3) Lower risk, renumbered minutes after saving while typing: CS/750 of 05/10/2026 (first CS/747, which the next bill then took; CS/748-749 were skipped) and MP GS/140 of 30/10/2026 (first GS/144): \"Please confirm the customer copies carry the final numbers\" - no repair expected."
+  },
+  {
+    "id": "TX13_NUMBER_GAPS",
+    "area": "transactions",
+    "title": "Missing numbers in a document series",
+    "severity": "medium",
+    "why": "GSTR-1's document summary must account for every sales invoice number issued: deleted or cancelled numbers have to be declared. A hole with HQ's deletion marker (User_IQDOC_Header TaskType=1) is a deleted bill; a hole with only an audit copy is a document deleted by a path that does not mark deletions (orders, vouchers, or a renumbered bill - TX12); a hole with no trace is a number HQ handed out to a bill that was closed with no valid line (Close_Button deletes the header) or lost.",
+    "detectSql": "SELECT CAST(NULL AS int) Doc_Id, s.Ttype + ' ' + s.TSeries + '/' + CAST(n.num AS varchar(12)) + ' missing: ' + CASE WHEN EXISTS (SELECT 1 FROM dbo.User_IQDOC_Header u WHERE u.Tt_Id=s.Tt_Id AND RTRIM(u.TSeries)=s.TSeries AND u.TNo=n.num AND u.TaskType=1) THEN 'deleted in HQ' WHEN EXISTS (SELECT 1 FROM dbo.User_IQDOC_Header u WHERE u.Tt_Id=s.Tt_Id AND RTRIM(u.TSeries)=s.TSeries AND u.TNo=n.num) THEN 'deleted or renumbered (audit copy only)' ELSE 'no trace (number skipped)' END AS Finding\nFROM (SELECT h.Tt_Id, RTRIM(h.TSeries) TSeries, RTRIM(ISNULL(MAX(t.Ttype),'')) Ttype, MAX(h.TNo) mx FROM dbo.IQDoc_Header h LEFT JOIN dbo.TTypes t ON t.TT_ID=h.Tt_Id WHERE h.Tt_Id<>222 GROUP BY h.Tt_Id, RTRIM(h.TSeries) HAVING COUNT(*)>1) s\nJOIN (SELECT TOP 5000 ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) num FROM sys.all_objects a CROSS JOIN sys.all_objects b) n ON n.num BETWEEN 1 AND s.mx\nWHERE NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Tt_Id=s.Tt_Id AND RTRIM(h.TSeries)=s.TSeries AND h.TNo=n.num AND ISNULL(LTRIM(h.TExtn),'')='')",
+    "counts": {
+      "mbm": 34,
+      "mp": 8
+    },
+    "examples": [
+      "MBM: GST Sales CS/317 missing: deleted in HQ",
+      "MBM: GST Sales CS/318 missing: no trace (number skipped)",
+      "MBM: GST Sales CS/665 missing: deleted or renumbered (audit copy only)",
+      "MBM: GST Purchases GSTPUR/44 missing: deleted in HQ",
+      "MP: GST Sales GS/2 missing: no trace (number skipped)"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Nothing to repair in the database (HQ never re-issues numbers and re-using one would itself be a GST error). Report for the GST filer: sales numbers MBM CS/317, 319, 320 deleted; CS/318, 401, 601, 602, 748, 749 never saved; CS/665 renumbered (TX12). MP GS/2-5 never saved. Purchase, order and voucher gaps are internal."
+  },
+  {
+    "id": "TX14_SUPPLIER_DATE_DEFAULTED",
+    "area": "transactions",
+    "title": "Purchase supplier-invoice date later than the purchase date (left at the entry-day default)",
+    "severity": "medium",
+    "why": "HQ's supplier-date picker defaults to the day the bill is typed. On every flagged purchase the supplier invoice date equals the entry date and is after the goods-received date, i.e. the real supplier invoice date was never entered. GSTR-2B/ITC reconciliation matches on invoice number and date, so these purchases will not match the supplier's GSTR-1.",
+    "detectSql": "SELECT h.Doc_Id, 'Purchase ' + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ' (supplier bill ' + LTRIM(RTRIM(ISNULL(h.Supp_Billno,''))) + ') has supplier date ' + CONVERT(char(10),h.Supp_Billdate,103) + CASE WHEN CAST(h.Supp_Billdate AS date)=CAST(h.Ent_Date AS date) THEN ' = the day it was entered' ELSE '' END AS Finding\nFROM dbo.IQDoc_Header h WHERE h.Tt_Id IN (500,501) AND h.Supp_Billdate>h.Doc_Date",
+    "counts": {
+      "mbm": 246,
+      "mp": 58
+    },
+    "examples": [
+      "MBM: Purchase GSTPUR/1 of 09/04/2026 (supplier bill JEP/26-27/105) has supplier date 23/04/2026 = the day it was entered",
+      "MBM: Purchase GSTPUR/2 of 16/04/2026 (supplier bill CTC/26-27/212) has supplier date 23/04/2026 = the day it was entered",
+      "MBM: Purchase GSTPUR/3 of 07/04/2026 (supplier bill KED-70) has supplier date 23/04/2026 = the day it was entered",
+      "MBM: Purchase GSTPUR/4 of 10/04/2026 (supplier bill GST/2026-27/58) has supplier date 23/04/2026 = the day it was entered",
+      "MBM: Purchase GSTPUR/5 of 02/04/2026 (supplier bill 26) has supplier date 23/04/2026 = the day it was entered"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner question: \"On 246 of 293 purchases (MBM) and 58 of 60 (MP) the supplier's invoice date was never typed; HQ kept the day of entry. Should the purchase date be treated as the supplier invoice date, or will you supply the real dates (from the supplier bills / GSTR-2B)?\" If the owner says \"use the purchase date\", the update is UPDATE dbo.IQDoc_Header SET Supp_Billdate=Doc_Date WHERE Tt_Id IN (500,501) AND Supp_Billdate>Doc_Date - but it rewrites posted purchase bills, so only on the owner's word. Prevention: the engine already takes the supplier date from the bill photo."
+  },
+  {
+    "id": "TX15_DUE_BEFORE_BILL_DATE",
+    "area": "transactions",
+    "title": "Due date earlier than the bill date",
+    "severity": "info",
+    "why": "A due date before the bill date is impossible; it comes from a stale date picker when bills are entered days later (MP GS/126-131 were all typed on 10/11/2026 for October with due date 01/10/2026). The IQDayBook rows of these bills have no due date (TRDueDate NULL) so ageing is unaffected, and all six are cash bills.",
+    "detectSql": "SELECT h.Doc_Id, RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ' has due date ' + CONVERT(char(10),h.Doc_Duedate,103) + ' (mode ' + CAST(ISNULL(h.Mode,0) AS varchar(4)) + ')' AS Finding\nFROM dbo.IQDoc_Header h WHERE h.Doc_Duedate<h.Doc_Date",
+    "counts": {
+      "mbm": 0,
+      "mp": 6
+    },
+    "examples": [
+      "MP: GS/126 of 03/10/2026 has due date 01/10/2026 (mode 0)",
+      "MP: GS/127 of 06/10/2026 has due date 01/10/2026 (mode 0)",
+      "MP: GS/128 of 07/10/2026 has due date 01/10/2026 (mode 0)",
+      "MP: GS/129 of 10/10/2026 has due date 01/10/2026 (mode 0)",
+      "MP: GS/130 of 15/10/2026 has due date 01/10/2026 (mode 0)"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Report only: HQ derives the due date from the party's credit days at entry time, so there is no single HQ-identical value to write; on cash bills the field is not used by the ledger. Mention to the operator (check the due-date box when back-dating bills)."
+  },
+  {
+    "id": "TX16_ZERO_RATE_SALE_LINE",
+    "area": "transactions",
+    "title": "Sale lines with rate 0 (goods issued free)",
+    "severity": "low",
+    "why": "A zero-rate line takes stock out without revenue or GST. Fine for genuine free samples; otherwise it is a missed charge.",
+    "detectSql": "SELECT d.Doc_Id, 'Sale ' + RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ' line ' + CAST(d.Ln_no AS varchar(6)) + ': ' + CAST(CAST(d.Qty AS decimal(19,2)) AS varchar(24)) + ' x ' + LTRIM(RTRIM(ISNULL(im.Item_Name,'#'+CAST(d.Item_ID AS varchar(12))))) + ' at rate 0' AS Finding\nFROM dbo.IQDoc_Delv d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_Id LEFT JOIN dbo.IQItems_Mast im ON im.Item_ID=d.Item_ID WHERE ISNULL(d.Rate,0)=0",
+    "counts": {
+      "mbm": 4,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: Sale CS/323 of 22/06/2026 line 5: 1.00 x 110*90 MM PVC REDUCER (4*3\") at rate 0",
+      "MBM: Sale CS/323 of 22/06/2026 line 17: 1.00 x SOLVENT GUM 250 ML at rate 0",
+      "MBM: Sale CS/323 of 22/06/2026 line 18: 40.00 x S S NAILS at rate 0",
+      "MBM: Sale CS/323 of 22/06/2026 line 19: 1.00 x CPVC GUM TIN 118 ML at rate 0",
+      "MP: Sale GS/22 of 12/05/2026 line 2: 15.00 x ASI EN BUS GREEN 500ML at rate 0"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Report to the owner as information; no repair."
+  },
+  {
+    "id": "TX17_ORPHAN_PAYMENT_SPLIT",
+    "area": "transactions",
+    "title": "Payment-split row (IQCreditCard) for a this-year bill number that has no header",
+    "severity": "low",
+    "why": "The \"Others\" payment dialog writes IQCreditCard before the bill is finally saved. If the bill is then abandoned, Close_Button deletes only IQCash_Tran and IQDoc_Header, leaving the split row. Doc_Id is an identity and is never re-issued, so no document can ever reach it; it only confuses checks that count a bill's feature rows.",
+    "detectSql": "SELECT x.Doc_id Doc_Id, 'Payment-split row ' + CAST(x.CreditCardDtldID AS varchar(12)) + ' for Doc_Id ' + CAST(x.Doc_id AS varchar(12)) + ' which has no bill (amounts all ' + CASE WHEN ISNULL(x.cash,0)+ISNULL(x.credit,0)+ISNULL(x.cheque,0)+ISNULL(x.card,0)+ISNULL(x.PhonePay,0)+ISNULL(x.GooglePay,0)+ISNULL(x.PayTM,0)+ISNULL(x.Others1,0)=0 THEN 'zero)' ELSE 'NOT zero)' END AS Finding\nFROM dbo.IQCreditCard x\nWHERE x.Doc_id >= (SELECT MIN(h.Doc_Id) FROM dbo.IQDoc_Header h)\n  AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_id)",
+    "counts": {
+      "mbm": 1,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: Payment-split row 107 for Doc_Id 9119 which has no bill (amounts all zero)"
+    ],
+    "fix": "auto",
+    "fixSql": "DELETE FROM dbo.IQDinamination WHERE CreditCardDtldID IN (SELECT x.CreditCardDtldID FROM dbo.IQCreditCard x WHERE x.Doc_id >= (SELECT MIN(h.Doc_Id) FROM dbo.IQDoc_Header h) AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_id) AND ISNULL(x.cash,0)+ISNULL(x.credit,0)+ISNULL(x.cheque,0)+ISNULL(x.card,0)+ISNULL(x.PhonePay,0)+ISNULL(x.GooglePay,0)+ISNULL(x.PayTM,0)+ISNULL(x.Others1,0)=0);\nDELETE x FROM dbo.IQCreditCard x WHERE x.Doc_id >= (SELECT MIN(h.Doc_Id) FROM dbo.IQDoc_Header h) AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_id)\n  AND ISNULL(x.cash,0)+ISNULL(x.credit,0)+ISNULL(x.cheque,0)+ISNULL(x.card,0)+ISNULL(x.PhonePay,0)+ISNULL(x.GooglePay,0)+ISNULL(x.PayTM,0)+ISNULL(x.Others1,0)=0;",
+    "fixNotes": "Deletes only all-zero split rows whose Doc_Id is in this year's range and has no header (the same rows HQ's Outward_Delete would have removed with the bill). A non-zero orphan would stay and need the owner. Tested in a rolled-back transaction: MBM 1 -> 0 (row 107, Doc_Id 9119, 14/07/2026), MP 0. Older orphans (Doc_Id below the year's first bill) are last-year leftovers: TX18."
+  },
+  {
+    "id": "TX18_PRIOR_YEAR_LEFTOVERS",
+    "area": "transactions",
+    "title": "Payment-split rows carried from last year whose bills are not in this year's database",
+    "severity": "info",
+    "why": "HQ's new-year copy brings IQCreditCard split rows for last year's bills. Their bills stayed in the old year's database, so nothing reads them, but they inflate row counts and confuse integrity checks that look for orphans.",
+    "detectSql": "SELECT x.Doc_id Doc_Id, 'Payment-split row ' + CAST(x.CreditCardDtldID AS varchar(12)) + ' for last-year Doc_Id ' + CAST(x.Doc_id AS varchar(12)) AS Finding\nFROM dbo.IQCreditCard x WHERE x.Doc_id < (SELECT MIN(h.Doc_Id) FROM dbo.IQDoc_Header h) AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_id)",
+    "counts": {
+      "mbm": 38,
+      "mp": 55
+    },
+    "examples": [
+      "MBM: Payment-split row 5 for last-year Doc_Id 147",
+      "MBM: Payment-split row 9 for last-year Doc_Id 149",
+      "MBM: Payment-split row 10 for last-year Doc_Id 150",
+      "MBM: Payment-split row 12 for last-year Doc_Id 153",
+      "MBM: Payment-split row 13 for last-year Doc_Id 154"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Report only. The rows belong to last year's bills, which live in last year's database; HQ's year-end copy carries them over and never reads them again. Leaving them is the HQ-faithful choice. The matching ADJUST leftovers are covered by the ledger audit (ADJ-DEAD, auto)."
+  },
+  {
+    "id": "TX19_DELETED_DOCUMENTS",
+    "area": "transactions",
+    "title": "Bills deleted in HQ this year (from HQ's own deletion marker)",
+    "severity": "info",
+    "why": "Outward_Delete/Inward_Delete remove every row of a bill and mark the last User_IQDOC_Header copy TaskType=1. Each deleted sales invoice number must be declared as cancelled in GSTR-1, and each deletion leaves IQItems_Mast.Stk stale for its items (TX07).",
+    "detectSql": "SELECT u.Doc_Id, 'Deleted ' + CASE WHEN u.Tt_Id IN (506,507) THEN 'sale ' ELSE 'purchase ' END + RTRIM(u.TSeries)+'/'+CAST(u.TNo AS varchar(12)) + ' of ' + CONVERT(char(10),u.Doc_Date,103) + ' (' + CAST(CAST(u.Bill_Amt AS decimal(19,2)) AS varchar(24)) + ', ' + LTRIM(RTRIM(ISNULL(u.ActName,''))) + ')' AS Finding\nFROM dbo.User_IQDOC_Header u WHERE u.TaskType=1 AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=u.Doc_Id)",
+    "counts": {
+      "mbm": 34,
+      "mp": 9
+    },
+    "examples": [
+      "MBM: Deleted purchase GSTPUR/44 of 07/05/2026 (1700.00, SRI VENKATA SAI AGENCIES)",
+      "MBM: Deleted purchase GSTPUR/59 of 20/05/2026 (1779.00, Cash on hand)",
+      "MBM: Deleted purchase GSTPUR/68 of 30/05/2026 (5015.00, CS WATER TAP)",
+      "MBM: Deleted purchase GSTPUR/84 of 21/06/2026 (23999.00, VASAVI PIPES)",
+      "MBM: Deleted sale CS/317 of 21/06/2026 (4900.00, CASH CUSTOMER)"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Information for the GST filer and the owner. Nothing to repair: the audit copies are HQ's intended history. Note: sales deleted and re-entered on the same day are normal corrections here (HQ's edit screen is avoided)."
+  },
+  {
+    "id": "TX20_ORPHAN_DOCUMENT_ROWS",
+    "area": "transactions",
+    "title": "Lines, party snapshot, charges, VAT or ledger rows whose document header no longer exists",
+    "severity": "high",
+    "why": "Rows that no header can reach still count in HQ's stock procedure only if joined to a header, but they distort any report that reads the detail tables directly and they block our engine's delete/amend verification. HQ's delete procedures remove all of them together, so they can only appear from an interrupted delete or a manual edit.",
+    "detectSql": "SELECT x.Doc_Id, x.t + ' row(s) for Doc_Id ' + CAST(x.Doc_Id AS varchar(12)) + ' which has no header' AS Finding\nFROM (SELECT 'Sale line' t, Doc_Id FROM dbo.IQDoc_Delv UNION ALL SELECT 'Purchase line', Doc_ID FROM dbo.IQDoc_Recd UNION ALL SELECT 'Order line', Doc_ID FROM dbo.IQOrd_Detail\n      UNION ALL SELECT 'Party snapshot', Doc_Id FROM dbo.IQCash_TRAN UNION ALL SELECT 'VAT summary', Doc_Id FROM dbo.IQDOC_VAT UNION ALL SELECT 'Charge', Doc_id FROM dbo.IQDoc_Chrgs\n      UNION ALL SELECT 'Ledger', Doc_ID FROM dbo.IQDayBook WHERE Doc_ID>0) x\nWHERE NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_Id)\nGROUP BY x.t, x.Doc_Id",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "auto",
+    "fixSql": "-- Same order as HQ's Outward_Delete; only rows whose Doc_Id has no header. Refresh stock afterwards (TX07 fix).\nDELETE x FROM dbo.IQDoc_Recd x WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_ID);\nDELETE x FROM dbo.IQDoc_Delv x WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_Id);\nDELETE x FROM dbo.IQOrd_Detail x WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_ID);\nDELETE x FROM dbo.IQDOC_VAT x WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_Id);\nDELETE x FROM dbo.IQDoc_Chrgs x WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_id);\nDELETE x FROM dbo.IQCash_TRAN x WHERE NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_Id);\nDELETE x FROM dbo.IQDayBook x WHERE x.Doc_ID>0 AND NOT EXISTS (SELECT 1 FROM dbo.IQDoc_Header h WHERE h.Doc_Id=x.Doc_ID)\n  AND NOT EXISTS (SELECT 1 FROM dbo.ADJUST a WHERE x.SR_NO IN (a.Sr_No, a.Rel_Sr_No));\nUPDATE dbo.IQItems_Mast SET Stk=0;\nEXEC dbo.[UpdateClosing_Stock_B+NG] @mItem_ID=0;",
+    "fixNotes": "Guard check: 0 on both firms today. The fix is what HQ's own delete procedure does for these tables; ledger rows that still carry bill-to-bill settlements are kept for the owner (money was allocated against them)."
+  },
+  {
+    "id": "TX21_LINE_GST_ARITHMETIC",
+    "area": "transactions",
+    "title": "Line GST values inconsistent with taxable value, rate and CGST/SGST split",
+    "severity": "medium",
+    "why": "GST returns are built from line values. A line whose tax is not taxable x rate, whose net is not taxable + tax, or whose CGST+SGST does not equal the tax would file wrong tax.",
+    "detectSql": "SELECT l.Doc_Id, RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' line ' + CAST(l.Ln_no AS varchar(6)) + ': taxable ' + CAST(CAST(l.GrossValue AS decimal(19,2)) AS varchar(24)) + ' @' + CAST(CAST(l.Tax AS decimal(19,2)) AS varchar(24)) + '% tax ' + CAST(CAST(l.TaxValue AS decimal(19,2)) AS varchar(24)) + ' CGST ' + CAST(CAST(ISNULL(l.CGST_TaxAmt,0) AS decimal(19,2)) AS varchar(24)) + ' SGST ' + CAST(CAST(ISNULL(l.SGST_TaxAmt,0) AS decimal(19,2)) AS varchar(24)) + ' net ' + CAST(CAST(l.NetValue AS decimal(19,2)) AS varchar(24)) AS Finding\nFROM (SELECT Doc_Id, Ln_no, GrossValue, Tax, TaxValue, NetValue, CGST_TaxAmt, SGST_TaxAmt FROM dbo.IQDoc_Delv\n      UNION ALL SELECT Doc_ID, Ln_no, GrossValue, Tax, TaxValue, NetValue, CGST_TaxAmt, SGST_TaxAmt FROM dbo.IQDoc_Recd\n      UNION ALL SELECT Doc_ID, Ln_No, GrossValue, Tax, TaxValue, NetValue, CGST_TaxAmt, SGST_TaxAmt FROM dbo.IQOrd_Detail) l\nJOIN dbo.IQDoc_Header h ON h.Doc_Id=l.Doc_Id\nWHERE h.Tt_Id<>222 AND ( ABS(l.NetValue-(l.GrossValue+l.TaxValue))>0.011\n   OR ABS(l.TaxValue-ROUND(l.GrossValue*l.Tax/100,2))>0.011\n   OR (h.GST_Type=1 AND l.TaxValue>=0 AND ABS(ISNULL(l.CGST_TaxAmt,0)+ISNULL(l.SGST_TaxAmt,0)-l.TaxValue)>0.011) )",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Guard check: 0 on both firms (all ~12,400 MBM and ~540 MP stored lines outside opening stock are internally consistent; GstParityTests cover the same ground). Negative-value order lines are excluded from the split test because HQ itself stores Math.Abs of the CGST/SGST amounts there (FrmInwards order save), e.g. SO/184 line 14."
+  },
+  {
+    "id": "TX22_LINE_ITEM_REFERENCES",
+    "area": "transactions",
+    "title": "Document lines pointing at a missing or inactive item, or an item without exactly one unit row",
+    "severity": "medium",
+    "why": "HQ's stock procedure joins IQItems_Units by item only: an item with no unit row silently drops out of the stock calculation, and one with two unit rows doubles it. Lines of deleted/inactive items cannot be re-opened in HQ.",
+    "detectSql": "SELECT l.Doc_Id, l.Item_ID, RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' line ' + CAST(l.Ln_no AS varchar(6)) + ': item ' + CAST(l.Item_ID AS varchar(12)) + CASE WHEN im.Item_ID IS NULL THEN ' does not exist' WHEN ISNULL(im.Item_Stat,0)<>0 THEN ' is inactive' WHEN u.n IS NULL THEN ' has no unit row' ELSE ' has ' + CAST(u.n AS varchar(6)) + ' unit rows' END AS Finding\nFROM (SELECT Doc_Id, Ln_no, Item_ID FROM dbo.IQDoc_Delv UNION ALL SELECT Doc_ID, Ln_no, Item_ID FROM dbo.IQDoc_Recd UNION ALL SELECT Doc_ID, Ln_No, Item_ID FROM dbo.IQOrd_Detail) l\nJOIN dbo.IQDoc_Header h ON h.Doc_Id=l.Doc_Id\nLEFT JOIN dbo.IQItems_Mast im ON im.Item_ID=l.Item_ID\nLEFT JOIN (SELECT Item_ID, COUNT(*) n FROM dbo.IQItems_Units GROUP BY Item_ID) u ON u.Item_ID=l.Item_ID\nWHERE im.Item_ID IS NULL OR ISNULL(im.Item_Stat,0)<>0 OR u.n IS NULL OR u.n<>1",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Guard check: 0 on both firms (2,485 MBM / 400 MP items, all active, each with exactly one IQItems_Units row). If it ever fires, the item must be restored/reactivated in HQ's item master (owner), not deleted from bills."
+  },
+  {
+    "id": "TX23_DATE_OUT_OF_YEAR",
+    "area": "transactions",
+    "title": "Document dated outside the financial year 01/04/2026-31/03/2027 or in the future",
+    "severity": "high",
+    "why": "A bill outside the year lands in the wrong year's books and GST returns; a future-dated bill is usually a typo in the date box.",
+    "detectSql": "SELECT h.Doc_Id, RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' (Tt ' + CAST(h.Tt_Id AS varchar(6)) + ') dated ' + CONVERT(char(10),h.Doc_Date,103) + CASE WHEN h.Doc_Date>CAST(GETDATE() AS date) THEN ' - in the future' ELSE ' - outside the financial year' END AS Finding\nFROM dbo.IQDoc_Header h\nWHERE h.Tt_Id<>222 AND (h.Doc_Date<'20260401' OR h.Doc_Date>'20270331' OR h.Doc_Date>CAST(GETDATE() AS date))",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Guard check: 0 on both firms (opening stock, Tt 222, is dated 31/03/2026 by HQ's design and is excluded; see TX10). Back-dated entry is common (purchases typed up to weeks later, MP sales of October typed on 10/11/2026) and is not an error."
+  },
+  {
+    "id": "TX24_FINISHED_BILL_WITHOUT_AUDIT",
+    "area": "transactions",
+    "title": "Finished sale/purchase bill without HQ's change-log copy (User_IQDOC_Header)",
+    "severity": "low",
+    "why": "Every completed HQ save writes a User_IQ* copy (SaveData_For_UserChanges_or_Tracking). A finished document with no copy was written by something other than HQ's form, or the log was cleared; it also leaves TX03-style questions unanswerable.",
+    "detectSql": "SELECT h.Doc_Id, RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) + ' of ' + CONVERT(char(10),h.Doc_Date,103) + ' (Tt ' + CAST(h.Tt_Id AS varchar(6)) + ', entered on ' + ISNULL(h.BillEnteredSystem,'?') + ') has no change-log copy' AS Finding\nFROM dbo.IQDoc_Header h\nWHERE h.Tt_Id IN (500,501,506,507) AND EXISTS (SELECT 1 FROM dbo.IQDOC_VAT v WHERE v.Doc_Id=h.Doc_Id)\n  AND NOT EXISTS (SELECT 1 FROM dbo.User_IQDOC_Header u WHERE u.Doc_Id=h.Doc_Id)",
+    "counts": {
+      "mbm": 0,
+      "mp": 0
+    },
+    "examples": [],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Guard check: 0 on both firms. Half-saved documents (TX01/TX02) lack the copy by nature and are excluded here; orders are excluded because the TX02 repair deliberately does not invent audit copies. Opening-stock documents never get one (HQ's new-year tool does not log), except OPSTK/23 which was edited in HQ's form."
+  }
+]

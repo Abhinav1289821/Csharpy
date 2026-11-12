@@ -284,6 +284,8 @@ public sealed class HqSession : IAsyncDisposable
             8152 or 2628 => new HqException("HQ_FIELD_TOO_LONG", "A value is longer than HQ can store" + where, FailureKind.Invalid, inner: e),
             // 201/8144: wrong arguments for an HQ procedure — an engine bug or a changed HQ build. Keep SQL's own text.
             201 or 8144 or 8145 => new HqException("HQ_PROCEDURE_CHANGED", $"HQ procedure call failed{where}: {e.Message}", FailureKind.Internal, inner: e),
+            // RAISERROR text (HQ's own procedures, and the HQ form checks MK's repairs reproduce): say it in HQ's words.
+            50000 => new HqException("HQ_REFUSED", $"HQ refuses this{where}: {e.Errors[0].Message}", FailureKind.Invalid, inner: e),
             _ => new HqException("HQ_SQL_ERROR", $"HQ rejected the operation{where}: SQL error {e.Number}", FailureKind.Unavailable, new { sql = e.Message }, e),
         };
     }

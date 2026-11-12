@@ -1,0 +1,712 @@
+[
+  {
+    "id": "CF01-item-hsn-gst",
+    "area": "crossfirm",
+    "title": "Same product in both firms with a different HSN code or GST rate",
+    "severity": "medium",
+    "why": "The same goods must carry the same HSN and rate in both GSTINs; a mismatch means at least one firm reports the wrong HSN summary (GSTR-1 Table 12) or charges the wrong tax.",
+    "detectSql": "SELECT 'MBM '+CAST(a.Item_ID AS varchar(10))+' \"'+LTRIM(RTRIM(a.Item_Name))+'\" HSN '+ISNULL(NULLIF(LTRIM(RTRIM(a.HSNCODE)),''),'(blank)')+' '+CAST(CAST(a.VAT AS float) AS varchar(10))+'% | MP '+CAST(b.Item_ID AS varchar(10))+' \"'+LTRIM(RTRIM(b.Item_Name))+'\" HSN '+ISNULL(NULLIF(LTRIM(RTRIM(b.HSNCODE)),''),'(blank)')+' '+CAST(CAST(b.VAT AS float) AS varchar(10))+'%'+CASE WHEN a.VAT<>b.VAT THEN ' [GST rate differs]' WHEN LEFT(LTRIM(a.HSNCODE),4)=LEFT(LTRIM(b.HSNCODE),4) THEN ' [same heading, different length]' ELSE ' [different HSN heading]' END AS Finding\nFROM {MBM}.dbo.IQItems_Mast a JOIN {MP}.dbo.IQItems_Mast b ON REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(UPPER(LTRIM(RTRIM(a.Item_Name))),' ',''),'.',''),',',''),'-',''),'&','') = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(UPPER(LTRIM(RTRIM(b.Item_Name))),' ',''),'.',''),',',''),'-',''),'&','') COLLATE SQL_Latin1_General_CP1_CI_AS\nWHERE LTRIM(RTRIM(ISNULL(a.HSNCODE,''))) <> LTRIM(RTRIM(ISNULL(b.HSNCODE,''))) COLLATE SQL_Latin1_General_CP1_CI_AS OR a.VAT<>b.VAT",
+    "database": "cross",
+    "counts": {
+      "mbm": 16,
+      "mp": 16
+    },
+    "examples": [
+      "MBM 643 \"100 MM PAINT BRUSH\" HSN 96034010 18% ! MP 192 \"100 MM PAINT BRUSH\" HSN 9603 18% [same heading, different length]",
+      "MBM 858 \"FLUSH TANK\" HSN 3922200 18% ! MP 257 \"FLUSH TANK\" HSN 3922 18% [same heading, different length]",
+      "MBM 861 \"SEAT COVER\" HSN 3922200 18% ! MP 258 \"SEAT COVER\" HSN 3922 18% [same heading, different length]",
+      "MBM 878 \"ASI EN BROWN 200 ml\" HSN (blank) 0% ! MP 274 \"ASI EN BROWN 200ML\" HSN 320890 18% [GST rate differs]",
+      "MBM 879 \"ASI EN P O RED 50 ml\" HSN (blank) 0% ! MP 129 \"ASI EN PO RED 50 ML\" HSN 3208 18% [GST rate differs]"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: for each pair, which HSN/rate is right (or a third value)? Then apply through the item-cleanup flow (HQ item save) in the firm that is wrong. Water tanks: MP uses 7213 (iron bars) and MBM 3917 (pipes); 3925 10 00 is the usual heading for plastic tanks >300 l. Counts are cross-firm pairs (same number shown for both firms)."
+  },
+  {
+    "id": "CF02-party-gstin-differs",
+    "area": "crossfirm",
+    "title": "Same party in both firms with a different GSTIN",
+    "severity": "high",
+    "why": "One of the two GSTINs is wrong; B2B invoices/ITC filed under a wrong GSTIN do not reach the party's GSTR-2B. The check digit shows which side is right.",
+    "detectSql": "SELECT '\"'+LTRIM(RTRIM(a.Act_Name))+'\": MBM '+CAST(a.Act_Id AS varchar(10))+' '+UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,''))))+CASE WHEN CASE WHEN LEN(UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,'')))))=15 AND (UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,'')))) LIKE '[0-9][0-9][A-Z][A-Z][A-Z][A-Z][A-Z][0-9][0-9][0-9][0-9][A-Z][1-9A-Z]Z[0-9A-Z]' COLLATE Latin1_General_BIN) AND SUBSTRING(UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,'')))),15,1)=SUBSTRING('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',(36-(SELECT SUM(p/36+p%36) FROM (SELECT (CHARINDEX(SUBSTRING(UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,'')))),n+1,1),'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')-1)*(n%2+1) p FROM (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13)) v(n)) q)%36)%36+1,1) THEN 1 ELSE 0 END=1 THEN ' (valid)' ELSE ' (INVALID)' END+' vs MP '+CAST(b.Act_Id AS varchar(10))+' '+UPPER(LTRIM(RTRIM(ISNULL(pa.GSTIN,''))))+CASE WHEN CASE WHEN LEN(UPPER(LTRIM(RTRIM(ISNULL(pa.GSTIN,'')))))=15 AND (UPPER(LTRIM(RTRIM(ISNULL(pa.GSTIN,'')))) LIKE '[0-9][0-9][A-Z][A-Z][A-Z][A-Z][A-Z][0-9][0-9][0-9][0-9][A-Z][1-9A-Z]Z[0-9A-Z]' COLLATE Latin1_General_BIN) AND SUBSTRING(UPPER(LTRIM(RTRIM(ISNULL(pa.GSTIN,'')))),15,1)=SUBSTRING('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',(36-(SELECT SUM(p/36+p%36) FROM (SELECT (CHARINDEX(SUBSTRING(UPPER(LTRIM(RTRIM(ISNULL(pa.GSTIN,'')))),n+1,1),'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')-1)*(n%2+1) p FROM (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13)) v(n)) q)%36)%36+1,1) THEN 1 ELSE 0 END=1 THEN ' (valid)' ELSE ' (INVALID)' END AS Finding\nFROM {MBM}.dbo.IQAccmst a JOIN {MBM}.dbo.IQAccAdr ma ON ma.Act_Id=a.Act_Id\nJOIN {MP}.dbo.IQAccmst b ON REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(UPPER(LTRIM(RTRIM(a.Act_Name))),' ',''),'.',''),',',''),'-',''),'&','') = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(UPPER(LTRIM(RTRIM(b.Act_Name))),' ',''),'.',''),',',''),'-',''),'&','') COLLATE SQL_Latin1_General_CP1_CI_AS\nJOIN {MP}.dbo.IQAccAdr pa ON pa.Act_Id=b.Act_Id\nWHERE a.Act_Type IN ('Customer','Supplier','Customer-Supplier') AND UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,''))))<>'' AND UPPER(LTRIM(RTRIM(ISNULL(pa.GSTIN,''))))<>'' AND UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,''))))<>UPPER(LTRIM(RTRIM(ISNULL(pa.GSTIN,'')))) COLLATE SQL_Latin1_General_CP1_CI_AS",
+    "database": "cross",
+    "counts": {
+      "mbm": 3,
+      "mp": 3
+    },
+    "examples": [
+      "\"VOLTA IMPEX PVT Ltd\": MBM 10457 37AAACV8160F3Z7 (valid) vs MP 10212 37AAACV8160F327 (INVALID)",
+      "\"DINESH TRADERS\": MBM 10744 37AEWPJ2076H1Z1 (valid) vs MP 10218 37AEVVPJ2076H1Z (INVALID)",
+      "\"GODAVARI FINECHEM\": MBM 10777 37AARFG4837A1ZB (valid) vs MP 10224 37AARFG48371ZB (INVALID)"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: confirm the valid GSTIN (all 3 current cases: the MBM value passes the check digit, the MP value is a typo). Then correct it in MP through HQ's account screen (re-save rewrites IQAccAdr exactly as HQ does), or via mk-hq AccountMasterService. Counts are cross-firm pairs."
+  },
+  {
+    "id": "CF03-party-name-spelling",
+    "area": "crossfirm",
+    "title": "Same GSTIN in both firms, different party name spelling",
+    "severity": "low",
+    "why": "Name drift makes the shared customer/supplier list unreliable and GSTR-1/2B matching by name harder; the legal name should be identical.",
+    "detectSql": "SELECT UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,''))))+': MBM '+CAST(a.Act_Id AS varchar(10))+' \"'+LTRIM(RTRIM(a.Act_Name))+'\" | MP '+CAST(b.Act_Id AS varchar(10))+' \"'+LTRIM(RTRIM(b.Act_Name))+'\"' AS Finding\nFROM {MBM}.dbo.IQAccmst a JOIN {MBM}.dbo.IQAccAdr ma ON ma.Act_Id=a.Act_Id\nJOIN {MP}.dbo.IQAccAdr pa ON UPPER(LTRIM(RTRIM(ISNULL(pa.GSTIN,''))))=UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,'')))) COLLATE SQL_Latin1_General_CP1_CI_AS\nJOIN {MP}.dbo.IQAccmst b ON b.Act_Id=pa.Act_Id\nWHERE LEN(UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,'')))))=15 AND REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(UPPER(LTRIM(RTRIM(a.Act_Name))),' ',''),'.',''),',',''),'-',''),'&','')<>REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(UPPER(LTRIM(RTRIM(b.Act_Name))),' ',''),'.',''),',',''),'-',''),'&','') COLLATE SQL_Latin1_General_CP1_CI_AS",
+    "database": "cross",
+    "counts": {
+      "mbm": 19,
+      "mp": 19
+    },
+    "examples": [
+      "37AAPCS5866G1Z0: MBM 11007 \"M/s SVEYDI INFRASTRUCTURE PVT.LTD\" ! MP 10264 \"SVEYDI INFRASTRUCTURE PVT Ltd\"",
+      "37AAYPU4481H1ZR: MBM 11014 \"SIXTH ELEMENT ENINEERING\" ! MP 10273 \"SIXTH ELEMENT ENGINEERING\"",
+      "37ABNFM1350P1ZQ: MBM 11016 \"Mrgha thermo pack industries\" ! MP 10255 \"MEGA THERMO PACK INDUSTRIS\"",
+      "37EFLPP3785T1Z9: MBM 11062 \"P SUDHANDRAVIJAYALAXMI\" ! MP 10263 \"P SUDHACHANDRA VIJAYALAXMI\"",
+      "37ATLPB9552E1ZK: MBM 11117 \"KIRAN AGENCIES\" ! MP 10206 \"Kiran agencises\""
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: pick the spelling (usually the legal name on the GST portal) for each GSTIN. Renames go through HQ's account save (IQaccmst_update also renames IQNrMast). Counts are cross-firm pairs."
+  },
+  {
+    "id": "CF04-party-gst-type-state",
+    "area": "crossfirm",
+    "title": "Same GSTIN in both firms with a different GST type, state or account type",
+    "severity": "medium",
+    "why": "GST type decides B2B vs B2C reporting and state decides place of supply; the same registration cannot be Registered in one firm and Unregistered in the other.",
+    "detectSql": "SELECT UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,''))))+' \"'+LTRIM(RTRIM(a.Act_Name))+'\": MBM type '+CAST(ISNULL(CAST(ma.GSTTaxType AS int),-1) AS varchar(3))+' state ['+ISNULL(ma.Act_state,'')+'] '+a.Act_Type+' vs MP type '+CAST(ISNULL(CAST(pa.GSTTaxType AS int),-1) AS varchar(3))+' state ['+ISNULL(pa.Act_state,'')+'] '+b.Act_Type AS Finding\nFROM {MBM}.dbo.IQAccmst a JOIN {MBM}.dbo.IQAccAdr ma ON ma.Act_Id=a.Act_Id\nJOIN {MP}.dbo.IQAccAdr pa ON UPPER(LTRIM(RTRIM(ISNULL(pa.GSTIN,''))))=UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,'')))) COLLATE SQL_Latin1_General_CP1_CI_AS\nJOIN {MP}.dbo.IQAccmst b ON b.Act_Id=pa.Act_Id\nWHERE LEN(UPPER(LTRIM(RTRIM(ISNULL(ma.GSTIN,'')))))=15 AND (ISNULL(CAST(ma.GSTTaxType AS int),-1)<>ISNULL(CAST(pa.GSTTaxType AS int),-1) OR ISNULL(ma.Act_state,'')<>ISNULL(pa.Act_state,'') COLLATE SQL_Latin1_General_CP1_CI_AS OR a.Act_Type<>b.Act_Type COLLATE SQL_Latin1_General_CP1_CI_AS)",
+    "database": "cross",
+    "counts": {
+      "mbm": 3,
+      "mp": 3
+    },
+    "examples": [
+      "37EFLPP3785T1Z9 \"P SUDHANDRAVIJAYALAXMI\": MBM type 2 state [37-Andhra Pradesh] Customer vs MP type 0 state [37-Andhra Pradesh] Customer",
+      "37AUXPK5620R1ZL \"VENKATA SAI GENERAL STORES\": MBM type 0 state [37-Andhra Pradesh] Supplier vs MP type 0 state [37-Andhra Pradesh] Customer-Supplier",
+      "37AAECA9377P1ZS \"Kostal pharma labs pvt ltd\": MBM type 0 state [] Customer vs MP type 0 state [37-Andhra Pradesh] Customer"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "GST type 0=Registered, 2=Unregistered. State blank/type mismatches are also caught per firm by GST03/GST04 (auto state fix there). Account type (Supplier vs Customer-Supplier) is the owner's call. Counts are cross-firm pairs."
+  },
+  {
+    "id": "CF05-charge-heads",
+    "area": "crossfirm",
+    "title": "Bill charge heads (Round Off, Freight, Cash Discount, CR/DR note) configured differently between the firms",
+    "severity": "high",
+    "why": "Round Off is \"Less\" (type 6) in MBM but \"Add\" (type 5) in MP. HQ posts a Less round-off on the wrong side, so 466 MBM GST bills are unbalanced by exactly 2x the round-off while all 199 MP bills balance. MP's heads point at accounts that do not exist (424/612/613/611).",
+    "detectSql": "SELECT 'Charge '+CAST(m.Chrg_Id AS varchar(6))+' '+RTRIM(m.Chrg_Name)+': MBM type '+CAST(m.Chrg_Type AS varchar(4))+' ('+RTRIM(mt.Chtp_Name)+') a/c '+CAST(m.Act_ID AS varchar(10))+' '+ISNULL(RTRIM(ma.Act_Name),'MISSING')+' vs MP type '+CAST(p.Chrg_Type AS varchar(4))+' ('+RTRIM(pt.Chtp_Name)+') a/c '+CAST(p.Act_ID AS varchar(10))+' '+ISNULL(RTRIM(pa.Act_Name),'MISSING') AS Finding\nFROM {MBM}.dbo.IQCHARGES m JOIN {MP}.dbo.IQCHARGES p ON p.Chrg_Id=m.Chrg_Id\nLEFT JOIN {MBM}.dbo.IQCHRG_TYPES mt ON mt.Chtp_Id=m.Chrg_Type LEFT JOIN {MP}.dbo.IQCHRG_TYPES pt ON pt.Chtp_Id=p.Chrg_Type\nLEFT JOIN {MBM}.dbo.IQAccmst ma ON ma.Act_Id=m.Act_ID LEFT JOIN {MP}.dbo.IQAccmst pa ON pa.Act_Id=p.Act_ID\nWHERE m.Chrg_Id IN (SELECT cs.chrg_Id FROM {MBM}.dbo.IQCHRGSETS cs WHERE cs.Set_No IN (23,24) UNION SELECT cs.chrg_Id FROM {MP}.dbo.IQCHRGSETS cs WHERE cs.Set_No IN (23,24))\nAND (m.Chrg_Type<>p.Chrg_Type OR m.Chrg_Rate<>p.Chrg_Rate OR ISNULL(ma.Act_Name,'~')<>ISNULL(pa.Act_Name,'~') COLLATE SQL_Latin1_General_CP1_CI_AS)",
+    "database": "cross",
+    "counts": {
+      "mbm": 3,
+      "mp": 3
+    },
+    "examples": [
+      "Charge 73 Round Off: MBM type 6 (Less) a/c 11134 Round off vs MP type 5 (Add) a/c 424 MISSING",
+      "Charge 82 Freight: MBM type 5 (Add) a/c 10126 FRIGHT CHARGES vs MP type 5 (Add) a/c 612 MISSING",
+      "Charge 108 Cash Discount: MBM type 4 (Discount) a/c 11132 Cash discount vs MP type 4 (Discount) a/c 613 MISSING"
+    ],
+    "fix": "owner",
+    "fixSql": "-- Option A (recommended; makes MBM behave like MP, future bills balanced). Run in {MBM}; equivalent to changing the head's type in HQ's Charges screen.\nUPDATE {MBM}.dbo.IQCHARGES SET Chrg_Type=5 WHERE Chrg_Id=73 AND Chrg_Type=6;\n-- MP account side is repaired by HL01 (missing a/c 424 -> ROUND OFF 10119).",
+    "fixNotes": "Owner question: \"Should Round Off be an ADD-type charge in both firms (as MP has it), so HQ posts balanced bills?\" Existing MBM bills stay unbalanced until re-saved in HQ (or re-posted by mk-hq); the Less->Add change only affects new saves. Freight/Cash Discount/CR-DR heads in MP point to missing accounts but post zero amounts today (no ledger impact). Counts are cross-firm pairs. Single-firm views of the same problem: LED-ROUNDOFF-CONFIG / CFG-01 (MBM Less) and CFG-04 / HL01 (MP missing account 424)."
+  },
+  {
+    "id": "CF06-transaction-types",
+    "area": "crossfirm",
+    "title": "Transaction types (TTYPES) set up differently between the firms",
+    "severity": "medium",
+    "why": "Same-numbered voucher types should behave the same: MP GST Sales has no rounding (RoundedOffTo 0) while MBM rounds to 1 rupee; Sales Orders the opposite; Opening Stock tax-inclusive only in MBM; Transfer Out is TT 512 in MBM but 252 in MP; MBM still has a legacy GST Purchase type 211.",
+    "detectSql": "SELECT 'TT '+CAST(ISNULL(m.TT_ID,p.TT_ID) AS varchar(6))+' '+ISNULL(RTRIM(m.ttype),RTRIM(p.ttype))+': '+CASE WHEN m.TT_ID IS NULL THEN 'only in MP' WHEN p.TT_ID IS NULL THEN 'only in MBM' ELSE\n CASE WHEN m.Firstor<>p.Firstor THEN 'Firstor '+CAST(m.Firstor AS varchar(3))+'/'+CAST(p.Firstor AS varchar(3))+' ' ELSE '' END+\n CASE WHEN m.vousetno<>p.vousetno THEN 'charge set '+CAST(m.vousetno AS varchar(6))+'/'+CAST(p.vousetno AS varchar(6))+' ' ELSE '' END+\n CASE WHEN ISNULL(m.RoundedOffTo,0)<>ISNULL(p.RoundedOffTo,0) OR ISNULL(m.RoundedOffType,0)<>ISNULL(p.RoundedOffType,0) THEN 'round to '+CAST(m.RoundedOffTo AS varchar(10))+'/'+CAST(p.RoundedOffTo AS varchar(10))+' ' ELSE '' END+\n CASE WHEN ISNULL(m.Inc_Tax,0)<>ISNULL(p.Inc_Tax,0) THEN 'tax-inclusive '+CAST(m.Inc_Tax AS varchar(3))+'/'+CAST(p.Inc_Tax AS varchar(3))+' ' ELSE '' END+\n CASE WHEN ISNULL(m.Tt_Status,0)<>ISNULL(p.Tt_Status,0) THEN 'status '+CAST(m.Tt_Status AS varchar(3))+'/'+CAST(p.Tt_Status AS varchar(3))+' ' ELSE '' END+\n CASE WHEN ISNULL(m.TaxType,0)<>ISNULL(p.TaxType,0) THEN 'taxtype '+CAST(m.TaxType AS varchar(3))+'/'+CAST(p.TaxType AS varchar(3))+' ' ELSE '' END+'(MBM/MP)' END AS Finding\nFROM {MBM}.dbo.TTYPES m FULL JOIN {MP}.dbo.TTYPES p ON p.TT_ID=m.TT_ID\nWHERE ISNULL(m.Vouchtype,p.Vouchtype) IN ('Purchase','Sales','Purchase Return','Sales Return','Purchase Order','Sales Order','Transfer In','Transfer Out','Opening Stock','Credit Note','Debit Note')\nAND (m.TT_ID IS NULL OR p.TT_ID IS NULL OR m.Firstor<>p.Firstor OR m.vousetno<>p.vousetno OR ISNULL(m.RoundedOffTo,0)<>ISNULL(p.RoundedOffTo,0) OR ISNULL(m.RoundedOffType,0)<>ISNULL(p.RoundedOffType,0) OR ISNULL(m.Inc_Tax,0)<>ISNULL(p.Inc_Tax,0) OR ISNULL(m.Tt_Status,0)<>ISNULL(p.Tt_Status,0) OR ISNULL(m.TaxType,0)<>ISNULL(p.TaxType,0))",
+    "database": "cross",
+    "counts": {
+      "mbm": 7,
+      "mp": 7
+    },
+    "examples": [
+      "TT 211 GST Purchase: only in MBM",
+      "TT 222 Opening Stock Entry: tax-inclusive 1/0 (MBM/MP)",
+      "TT 245 Stock Transfer - Receipts: charge set 24/0 (MBM/MP)",
+      "TT 249 Sales - Orders: round to 0.00/1.00 (MBM/MP)",
+      "TT 252 Trasfor Issues: only in MP"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner questions: (1) should MP GST Sales (506) round the bill to the rupee like MBM? (2) should MBM Sales Orders (249) round like MP? (3) Opening Stock entry: tax-inclusive (MBM) or exclusive (MP)? (4) MBM TT 211 \"GST Purchase\" (status 1, unused this year) can be hidden. Change only through HQ's Transaction Types screen; MK.Hq reads these per firm, so do not hard-code either firm's values. Counts are cross-firm rows."
+  },
+  {
+    "id": "CF07-charge-sets",
+    "area": "crossfirm",
+    "title": "Purchase/Sales charge sets contain different heads in the two firms",
+    "severity": "low",
+    "why": "MBM's Sales Set (24) offers Freight, Cash Discount and Round Off; MP's offers only Round Off, so the same sale cannot carry freight/discount in MP. Both firms also carry a prototype \"MK Core\" set.",
+    "detectSql": "SELECT 'Set '+CAST(ISNULL(m.Set_No,p.Set_No) AS varchar(6))+' '+ISNULL(m.nm,p.nm)+': MBM ['+ISNULL(m.heads,'-')+'] vs MP ['+ISNULL(p.heads,'-')+']' AS Finding\nFROM (SELECT s.Set_no, RTRIM(s.Set_name) nm, (SELECT STRING_AGG(RTRIM(c.Chrg_Name),', ') FROM {MBM}.dbo.IQCHRGSETS cs JOIN {MBM}.dbo.IQCHARGES c ON c.Chrg_Id=cs.chrg_Id WHERE cs.Set_No=s.Set_no) heads FROM {MBM}.dbo.IQCHRGSETMST s) m\nFULL JOIN (SELECT s.Set_no, RTRIM(s.Set_name) nm, (SELECT STRING_AGG(RTRIM(c.Chrg_Name),', ') FROM {MP}.dbo.IQCHRGSETS cs JOIN {MP}.dbo.IQCHARGES c ON c.Chrg_Id=cs.chrg_Id WHERE cs.Set_No=s.Set_no) heads FROM {MP}.dbo.IQCHRGSETMST s) p ON p.Set_no=m.Set_no\nWHERE ISNULL(m.heads,'-')<>ISNULL(p.heads,'-') COLLATE SQL_Latin1_General_CP1_CI_AS OR ISNULL(m.nm,'')<>ISNULL(p.nm,'') COLLATE SQL_Latin1_General_CP1_CI_AS",
+    "database": "cross",
+    "counts": {
+      "mbm": 3,
+      "mp": 3
+    },
+    "examples": [
+      "Set 24 Sales Set: MBM [Freight, Cash Discount, Round Off] vs MP [Round Off]",
+      "Set 27 MK Core Verified sale f0e57d9e: MBM [Freight, Cash Discount, MK Core Round sale f0e57d9e] vs MP [Adjustment, Cash Discount, MK Core Round purchase f0e57d9e]",
+      "Set 28 MK Core Verified purchase f0e57d9e: MBM [Adjustment, Cash Discount, MK Core Round purchase f0e57d9e] vs MP [-]"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: should MP sales bills offer Freight and Cash Discount like MBM? Change via HQ Charge Sets screen. Set numbers 27/28 are prototype sets (see AU02). Counts are cross-firm rows."
+  },
+  {
+    "id": "CF08-config-flags",
+    "area": "crossfirm",
+    "title": "Program settings (Configs) that change validation or printing differ between the firms",
+    "severity": "medium",
+    "why": "MP does not check duplicate supplier bill numbers (MBM does) and does not warn about the same item twice in a bill; GSTIN printing on vouchers, outstanding display, fixed-length bill numbers also differ. A duplicate purchase bill already exists in MP (GST11).",
+    "detectSql": "SELECT x.k+': MBM '+CAST(x.m AS varchar(6))+' vs MP '+CAST(x.p AS varchar(6)) AS Finding FROM (\nSELECT 'DuplicateSuppNo' k, CAST(ISNULL((SELECT TOP 1 DuplicateSuppNo FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 DuplicateSuppNo FROM {MP}.dbo.Configs),0) AS int) p\nUNION ALL SELECT 'ChkDuplicatItemBillEntry' k, CAST(ISNULL((SELECT TOP 1 ChkDuplicatItemBillEntry FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 ChkDuplicatItemBillEntry FROM {MP}.dbo.Configs),0) AS int) p\nUNION ALL SELECT 'BillNo_Fixed_Length' k, CAST(ISNULL((SELECT TOP 1 BillNo_Fixed_Length FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 BillNo_Fixed_Length FROM {MP}.dbo.Configs),0) AS int) p\nUNION ALL SELECT 'ShowGSTIN_FINVOCHERS_PRINT' k, CAST(ISNULL((SELECT TOP 1 ShowGSTIN_FINVOCHERS_PRINT FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 ShowGSTIN_FINVOCHERS_PRINT FROM {MP}.dbo.Configs),0) AS int) p\nUNION ALL SELECT 'ShowOutStandingBills_Sales' k, CAST(ISNULL((SELECT TOP 1 ShowOutStandingBills_Sales FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 ShowOutStandingBills_Sales FROM {MP}.dbo.Configs),0) AS int) p\nUNION ALL SELECT 'ImportPurbill' k, CAST(ISNULL((SELECT TOP 1 ImportPurbill FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 ImportPurbill FROM {MP}.dbo.Configs),0) AS int) p\nUNION ALL SELECT 'SalDCAutoPickup' k, CAST(ISNULL((SELECT TOP 1 SalDCAutoPickup FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 SalDCAutoPickup FROM {MP}.dbo.Configs),0) AS int) p\nUNION ALL SELECT 'TextPrintMode' k, CAST(ISNULL((SELECT TOP 1 TextPrintMode FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 TextPrintMode FROM {MP}.dbo.Configs),0) AS int) p\nUNION ALL SELECT 'ShowSPLRatesItemsCreation' k, CAST(ISNULL((SELECT TOP 1 ShowSPLRatesItemsCreation FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 ShowSPLRatesItemsCreation FROM {MP}.dbo.Configs),0) AS int) p\nUNION ALL SELECT 'UpdateRecent_Pur_Rate_Disc_To_ItemMast' k, CAST(ISNULL((SELECT TOP 1 UpdateRecent_Pur_Rate_Disc_To_ItemMast FROM {MBM}.dbo.Configs),0) AS int) m, CAST(ISNULL((SELECT TOP 1 UpdateRecent_Pur_Rate_Disc_To_ItemMast FROM {MP}.dbo.Configs),0) AS int) p) x WHERE x.m<>x.p",
+    "database": "cross",
+    "counts": {
+      "mbm": 9,
+      "mp": 9
+    },
+    "examples": [
+      "DuplicateSuppNo: MBM 1 vs MP 0",
+      "ChkDuplicatItemBillEntry: MBM 1 vs MP 0",
+      "BillNo_Fixed_Length: MBM 1 vs MP 0",
+      "ShowGSTIN_FINVOCHERS_PRINT: MBM 1 vs MP 0",
+      "ShowOutStandingBills_Sales: MBM 0 vs MP 1"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner question per flag; recommended: turn on \"Check Duplicate Supplier Bill No.\" and \"Check Duplicate Item Name In Bill Entry\" in MP (HQ Configs screen). NULL in MP is read as 0 by HQ. 43 other differing columns are NULL-vs-0 only (MP row predates those options) and harmless. Counts are cross-firm rows."
+  },
+  {
+    "id": "CF09-company-master",
+    "area": "crossfirm",
+    "title": "Company master (HQ main database) entries for the two firms are inconsistent",
+    "severity": "medium",
+    "why": "HQ prints the firm address/GSTIN/phone from here and e-way bill/e-invoice JSON need a 6-digit PIN; the licence record names one firm with the other's GSTIN; user period rows point at FY 2021, which MBM never had.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT RTRIM(c.CID)+': PIN field is \"'+ISNULL(c.Pin,'')+'\" (not a 6-digit PIN)' AS Finding FROM {MAIN}.dbo.[Company Master] c WHERE ISNULL(c.Pin,'') NOT LIKE '[1-9][0-9][0-9][0-9][0-9][0-9]'\nUNION ALL SELECT RTRIM(c.CID)+': Mobile field holds \"'+c.Mobile+'\" (not a phone number)' FROM {MAIN}.dbo.[Company Master] c WHERE ISNULL(c.Mobile,'')<>'' AND c.Mobile NOT LIKE '[6-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'\nUNION ALL SELECT RTRIM(c.CID)+': GSTIN state '+LEFT(c.GSTIN,2)+' does not match company state '+c.State FROM {MAIN}.dbo.[Company Master] c WHERE LEFT(c.GSTIN,2)<>LEFT(c.State,2)\nUNION ALL SELECT 'Licence (SYSPRM): customer \"'+RTRIM(s.CustName)+'\" registered with GSTIN '+s.CustGSTIN+', which is '+RTRIM(c.CID)+' ('+RTRIM(c.Companyname)+')' FROM {MAIN}.dbo.SYSPRM s JOIN {MAIN}.dbo.[Company Master] c ON c.GSTIN=s.CustGSTIN WHERE UPPER(REPLACE(c.Companyname,' ','')) NOT LIKE '%'+UPPER(REPLACE(REPLACE(s.CustName,' ',''),'and','AND'))+'%' AND UPPER(REPLACE(s.CustName,' ','')) NOT LIKE '%'+UPPER(REPLACE(c.Companyname,' ',''))+'%'\nUNION ALL SELECT RTRIM(u.CID)+': Company Users row for UID '+CAST(u.UID AS varchar(6))+' points at FY '+CAST(u.Fyear AS varchar(6))+', which has no FY row' FROM {MAIN}.dbo.[Company Users] u WHERE NOT EXISTS (SELECT 1 FROM {MAIN}.dbo.FY f WHERE f.CID=u.CID AND f.FY=u.Fyear)\nUNION ALL SELECT 'MBM: firm database has documents dated outside every FY row ('+CONVERT(char(10),MIN(h.Doc_Date),120)+'..'+CONVERT(char(10),MAX(h.Doc_Date),120)+')' FROM {MBM}.dbo.IQDoc_Header h WHERE h.Tt_Id<>222 AND NOT EXISTS (SELECT 1 FROM {MAIN}.dbo.FY f WHERE f.CID='MBM' AND h.Doc_Date BETWEEN f.startdt AND f.enddt) HAVING COUNT(*)>0\nUNION ALL SELECT 'MP: firm database has documents dated outside every FY row ('+CONVERT(char(10),MIN(h.Doc_Date),120)+'..'+CONVERT(char(10),MAX(h.Doc_Date),120)+')' FROM {MP}.dbo.IQDoc_Header h WHERE h.Tt_Id<>222 AND NOT EXISTS (SELECT 1 FROM {MAIN}.dbo.FY f WHERE f.CID='MP' AND h.Doc_Date BETWEEN f.startdt AND f.enddt) HAVING COUNT(*)>0\n) x",
+    "database": "cross",
+    "counts": {
+      "mbm": 5,
+      "mp": 5
+    },
+    "examples": [
+      "MBM: PIN field is \"PEDDAPURAM\" (not a 6-digit PIN)",
+      "MP: PIN field is \"PEDDAPURAM\" (not a 6-digit PIN)",
+      "MP: Mobile field holds \"37AKSPB4550E1Z7\" (not a phone number)",
+      "Licence (SYSPRM): customer \"MK Paints and Sanitary\" registered with GSTIN 37AHXPB8768N1Z6, which is MBM (MK BUILDING MATERIALS)",
+      "MBM: Company Users row for UID 1 points at FY 2021, which has no FY row"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "{MAIN} = HQ company-master database (MKHQ_AUDIT_MAIN here). Owner: give the PIN code of each shop and MP's real mobile number; enter them in HQ's Company screen. Licence/SYSPRM is HQ's registration record: report to HQ support, do not edit. Company Users FY 2021 rows are HQ's last-login memory; harmless, report only. Both firms' own GSTINs pass the check digit and match state 37. Counts are total rows."
+  },
+  {
+    "id": "GST01-taxed-lines-no-hsn",
+    "area": "gst",
+    "title": "Taxed bill lines with a missing or malformed HSN code",
+    "severity": "high",
+    "why": "GSTR-1 Table 12 (HSN summary) needs a 4-digit HSN (turnover up to 5 crore) on every taxable line; lines with tax and no/invalid HSN fall out of the summary or are rejected by the GST portal.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' '+CONVERT(char(10),h.Doc_Date,120)+' line '+CAST(d.Ln_no AS varchar(6))+': \"'+LTRIM(RTRIM(i.Item_Name))+'\" HSN ['+LTRIM(RTRIM(ISNULL(d.HSNCODE,'')))+'] tax '+CAST(d.TaxValue AS varchar(20))+CASE WHEN (LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]') THEN ' (item now has '+LTRIM(RTRIM(i.HSNCODE))+')' ELSE ' (item HSN also blank/invalid)' END AS Finding\nFROM IQDoc_Delv d JOIN IQDoc_Header h ON h.Doc_Id=d.Doc_Id JOIN IQItems_Mast i ON i.Item_ID=d.Item_ID\nWHERE h.Tt_Id IN (500,501,504,505,506,507,510,511,266,-2) AND d.TaxValue<>0 AND NOT (LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]')\nUNION ALL\nSELECT RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' '+CONVERT(char(10),h.Doc_Date,120)+' line '+CAST(d.Ln_no AS varchar(6))+': \"'+LTRIM(RTRIM(i.Item_Name))+'\" HSN ['+LTRIM(RTRIM(ISNULL(d.HSNCODE,'')))+'] tax '+CAST(d.TaxValue AS varchar(20))+CASE WHEN (LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]') THEN ' (item now has '+LTRIM(RTRIM(i.HSNCODE))+')' ELSE ' (item HSN also blank/invalid)' END\nFROM IQDoc_Recd d JOIN IQDoc_Header h ON h.Doc_Id=d.Doc_ID JOIN IQItems_Mast i ON i.Item_ID=d.Item_ID\nWHERE h.Tt_Id IN (500,501,504,505,506,507,510,511,266,-2) AND d.TaxValue<>0 AND NOT (LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]')) x",
+    "database": "both",
+    "counts": {
+      "mbm": 120,
+      "mp": 23
+    },
+    "examples": [
+      "MBM: CS/251 2026-06-06 line 6: \"COT THREAD\" HSN [] tax 1.52 (item HSN also blank/invalid)",
+      "MBM: CS/238 2026-06-03 line 3: \"Pencell\" HSN [] tax 27.46 (item HSN also blank/invalid)",
+      "MBM: CS/233 2026-06-02 line 1: \"C P HEALTH FACET\" HSN [] tax 73.22 (item HSN also blank/invalid)",
+      "MP: GS/15 2026-04-21 line 10: \"Water paper no 150\" HSN [] tax 45.76 (item HSN also blank/invalid)",
+      "MP: GS/14 2026-04-21 line 6: \"Water paper no 150\" HSN [] tax 22.88 (item HSN also blank/invalid)"
+    ],
+    "fix": "owner",
+    "fixSql": "-- Partial auto step (only lines whose item master NOW has a valid HSN): HQ copies the item HSN into the line on save, so this is what an HQ re-save writes.\nUPDATE d SET HSNCODE=LTRIM(RTRIM(i.HSNCODE)) FROM IQDoc_Delv d JOIN IQDoc_Header h ON h.Doc_Id=d.Doc_Id JOIN IQItems_Mast i ON i.Item_ID=d.Item_ID\nWHERE h.Tt_Id IN (500,501,504,505,506,507,510,511,266,-2) AND d.TaxValue<>0 AND NOT (LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]') AND (LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]');\nUPDATE d SET HSNCODE=LTRIM(RTRIM(i.HSNCODE)) FROM IQDoc_Recd d JOIN IQDoc_Header h ON h.Doc_Id=d.Doc_ID JOIN IQItems_Mast i ON i.Item_ID=d.Item_ID\nWHERE h.Tt_Id IN (500,501,504,505,506,507,510,511,266,-2) AND d.TaxValue<>0 AND NOT (LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(d.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]') AND (LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9]' OR LTRIM(RTRIM(ISNULL(i.HSNCODE,''))) LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]');",
+    "fixNotes": "Almost every affected item still has a blank/odd HSN in the master (MBM 116 of 120 lines, MP all 23), so the real fix is the item-cleanup HSN proposals (tools/item-cleanup) first, then re-run the partial step above. Owner question: \"approve the HSN for these items so past bills can be corrected before the next GSTR-1?\" Lines of months already filed need an HSN-summary amendment, not a silent change."
+  },
+  {
+    "id": "GST02-b2b-invalid-gstin-docs",
+    "area": "gst",
+    "title": "GST bills with a registered party whose GSTIN fails the check digit",
+    "severity": "high",
+    "why": "These invoices go into GSTR-1 B2B with a GSTIN the portal rejects (or worse, credit lands on someone else); purchases with such a supplier GSTIN cannot be matched with GSTR-2B. Support.cs lists bad GSTINs on masters; this shows the bills affected.",
+    "detectSql": "SELECT RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' '+CONVERT(char(10),h.Doc_Date,120)+' '+LTRIM(RTRIM(a.Act_Name))+' GSTIN '+UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,''))))+' amount '+CAST(h.Bill_Amt AS varchar(20)) AS Finding\nFROM IQDoc_Header h JOIN IQAccmst a ON a.Act_Id=h.Act_ID JOIN IQAccAdr ad ON ad.Act_Id=h.Act_ID\nWHERE h.Tt_Id IN (500,501,504,505,506,507,510,511,266,-2) AND UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,''))))<>'' AND CASE WHEN LEN(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))))=15 AND (UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))) LIKE '[0-9][0-9][A-Z][A-Z][A-Z][A-Z][A-Z][0-9][0-9][0-9][0-9][A-Z][1-9A-Z]Z[0-9A-Z]' COLLATE Latin1_General_BIN) AND SUBSTRING(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))),15,1)=SUBSTRING('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',(36-(SELECT SUM(p/36+p%36) FROM (SELECT (CHARINDEX(SUBSTRING(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))),n+1,1),'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')-1)*(n%2+1) p FROM (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13)) v(n)) q)%36)%36+1,1) THEN 1 ELSE 0 END=0",
+    "database": "both",
+    "counts": {
+      "mbm": 9,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: GSTPUR/255 2026-10-21 KRISHNA ELECTRICAL & DISTRIBUTORS GSTIN 37AFNPMO822Q1ZW amount 5984.00",
+      "MBM: GSTPUR/135 2026-07-10 KRISHNA ELECTRICAL & DISTRIBUTORS GSTIN 37AFNPMO822Q1ZW amount 7310.00",
+      "MBM: GSTPUR/114 2026-06-30 KRISHNA ELECTRICAL & DISTRIBUTORS GSTIN 37AFNPMO822Q1ZW amount 5816.00",
+      "MBM: GSTPUR/20 2026-04-18 KRISHNA ELECTRICAL & DISTRIBUTORS GSTIN 37AFNPMO822Q1ZW amount 23088.00",
+      "MBM: GSTPUR/157 2026-07-27 VIMAL ELECTRICALS GSTIN 37ASLPSO191F1Z1 amount 83502.00"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: get the correct GSTIN (GST portal search by name/PAN) and fix the party in HQ; then amend the affected months' B2B entries if already filed."
+  },
+  {
+    "id": "GST03-gstin-state-mismatch",
+    "area": "gst",
+    "title": "Party state blank or different from the state code in its GSTIN",
+    "severity": "medium",
+    "why": "Place of supply (and CGST/SGST vs IGST choice, e-way bill state) comes from the party state; HQ itself sets the state from the GSTIN's first two digits when a GSTIN is typed, so these rows were imported or typed before the GSTIN.",
+    "detectSql": "SELECT CAST(a.Act_Id AS varchar(10))+' '+LTRIM(RTRIM(a.Act_Name))+' GSTIN '+UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,''))))+' state ['+ISNULL(ad.Act_state,'')+']' AS Finding\nFROM IQAccmst a JOIN IQAccAdr ad ON ad.Act_Id=a.Act_Id\nWHERE LEN(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))))=15 AND (UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))) LIKE '[0-9][0-9][A-Z][A-Z][A-Z][A-Z][A-Z][0-9][0-9][0-9][0-9][A-Z][1-9A-Z]Z[0-9A-Z]' COLLATE Latin1_General_BIN) AND LEFT(ISNULL(ad.Act_state,''),2)<>LEFT(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))),2)",
+    "database": "both",
+    "counts": {
+      "mbm": 11,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: 10809 SNEHITHA ENTERPRISES GSTIN 36AYXPP3021F2Z7 state [37-Andhra Pradesh]",
+      "MBM: 10296 HALSTON distributors GSTIN 37AAEFH9506Q1ZQ state []",
+      "MBM: 10311 GUNA MARKETING- GSTIN 37ATHPA5774D1ZR state []",
+      "MBM: 10091 STAR PLASTICS GSTIN 37AAKFS1090C1ZB state []",
+      "MBM: 10157 Kostal pharma labs pvt ltd GSTIN 37AAECA9377P1ZS state []"
+    ],
+    "fix": "auto",
+    "fixSql": "-- Sets Act_state to the HQ state caption (as already stored by HQ in this firm) whose code = GSTIN prefix; this is the value HQ's Verify_GSTIN selects. Rows whose caption is not yet used in the firm are left for HQ.\nUPDATE ad SET Act_state=s.cap FROM IQAccAdr ad\nCROSS APPLY (SELECT TOP 1 x.Act_state cap FROM IQAccAdr x WHERE x.Act_state LIKE LEFT(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))),2)+'-%' GROUP BY x.Act_state ORDER BY COUNT(*) DESC) s\nWHERE LEN(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))))=15 AND (UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))) LIKE '[0-9][0-9][A-Z][A-Z][A-Z][A-Z][A-Z][0-9][0-9][0-9][0-9][A-Z][1-9A-Z]Z[0-9A-Z]' COLLATE Latin1_General_BIN) AND LEFT(ISNULL(ad.Act_state,''),2)<>LEFT(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))),2);",
+    "fixNotes": "Only the state column is changed (an HQ re-save would also re-trim the address and set Act_FoodLICExpDate); no posted bill changes because no bill used IGST/CGST wrongly (checked: 0 mismatched bills in either firm). Restricted to well-formed GSTINs, because HQ only auto-sets the state when the GSTIN pattern matches."
+  },
+  {
+    "id": "GST04-gstin-but-unregistered",
+    "area": "gst",
+    "title": "Party has a GSTIN but GST type \"Un-Registered\"",
+    "severity": "medium",
+    "why": "HQ treats the party as unregistered, so its invoices are reported as B2C (no GSTIN) and the buyer loses ITC; HQ's own form refuses this combination today, so these rows predate the check or were imported.",
+    "detectSql": "SELECT CAST(a.Act_Id AS varchar(10))+' '+LTRIM(RTRIM(a.Act_Name))+' GSTIN '+UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,''))))+' type '+CAST(ad.GSTTaxType AS varchar(3))+' bills '+CAST((SELECT COUNT(*) FROM IQDoc_Header h WHERE h.Act_ID=a.Act_Id) AS varchar(10)) AS Finding\nFROM IQAccmst a JOIN IQAccAdr ad ON ad.Act_Id=a.Act_Id WHERE UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,''))))<>'' AND ISNULL(ad.GSTTaxType,2) NOT IN (0,1)",
+    "database": "both",
+    "counts": {
+      "mbm": 5,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: 11032 VIJAYA MARKETING GSTIN 37DKVPS9808E1ZP type 2 bills 0",
+      "MBM: 11033 Sri ramadasu motar transport Ltd GSTIN 37AADCS1196B1ZJ type 2 bills 0",
+      "MBM: 11034 Sri suryanarayana enterprises GSTIN 37AEAPV5603C1ZQ type 2 bills 0",
+      "MBM: 11040 R T AGENCISES GSTIN 37ABCFR31891ZY type 2 bills 0",
+      "MBM: 11062 P SUDHANDRAVIJAYALAXMI GSTIN 37EFLPP3785T1Z9 type 2 bills 0"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: \"Are these parties GST-registered?\" If yes set GST type Registered in HQ (P SUDHACHANDRA VIJAYALAXMI is Registered in MP). If no, clear the GSTIN."
+  },
+  {
+    "id": "GST05-duplicate-gstin",
+    "area": "gst",
+    "title": "Two or more party accounts share one GSTIN within a firm",
+    "severity": "medium",
+    "why": "Same registration under several ledgers splits outstanding balances and B2B totals; sometimes the GSTIN was copied to an unrelated party (e.g. CROPX OVERSEAS vs SENTINI COMTRADE).",
+    "detectSql": "SELECT UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,''))))+': '+STRING_AGG(CAST(a.Act_Id AS varchar(10))+' '+LTRIM(RTRIM(a.Act_Name)),' / ') AS Finding\nFROM IQAccAdr ad JOIN IQAccmst a ON a.Act_Id=ad.Act_Id WHERE LEN(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))))>0 GROUP BY UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))) HAVING COUNT(*)>1",
+    "database": "both",
+    "counts": {
+      "mbm": 12,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: 37AABCD0248B1Z9: 11155 DEVI SEA FOODS Ltd unit / 10247 DEVI SEA FOODS Ltd UNIT - 3",
+      "MBM: 37AADCB5352J1ZL: 10638 BSR INFRATECH INDIAL LTD / 10627 B S R INFRATECH INDIA Ltd",
+      "MBM: 37AADCS1196B1ZJ: 10655 S R M T Ltd / 11033 Sri ramadasu motar transport Ltd",
+      "MBM: 37AAGCG8917K1Z2: 10971 GREEN STAR FOOD&BEVERAGES (O P C) / 10996 GREENTARS FOODAND BEVERAGES pvt ltd",
+      "MBM: 37AAHFU5775F1ZQ: 11178 UPRIGHT projects LLP / 11287 UPRIGHT projects LLP ( A D B )"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: for each group, which account is the real one? Merging ledgers in HQ is manual (move bills, then deactivate the extra account). Branch units with their own GSTIN are not duplicates."
+  },
+  {
+    "id": "GST06-party-has-own-gstin",
+    "area": "gst",
+    "title": "A party account carries the firm's own GSTIN",
+    "severity": "medium",
+    "why": "A supplier/customer cannot have the firm's own GSTIN; any bill to it would be a self-invoice in GSTR-1.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT 'MBM '+CAST(a.Act_Id AS varchar(10))+' '+LTRIM(RTRIM(a.Act_Name))+' has GSTIN '+UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,''))))+' = own GSTIN; bills '+CAST((SELECT COUNT(*) FROM {MBM}.dbo.IQDoc_Header h WHERE h.Act_ID=a.Act_Id) AS varchar(10)) AS Finding FROM {MBM}.dbo.IQAccAdr ad JOIN {MBM}.dbo.IQAccmst a ON a.Act_Id=ad.Act_Id JOIN {MAIN}.dbo.[Company Master] c ON c.CID='MBM' AND c.GSTIN=UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))) COLLATE SQL_Latin1_General_CP1_CI_AS\nUNION ALL\nSELECT 'MP '+CAST(a.Act_Id AS varchar(10))+' '+LTRIM(RTRIM(a.Act_Name))+' has GSTIN '+UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,''))))+' = own GSTIN; bills '+CAST((SELECT COUNT(*) FROM {MP}.dbo.IQDoc_Header h WHERE h.Act_ID=a.Act_Id) AS varchar(10)) FROM {MP}.dbo.IQAccAdr ad JOIN {MP}.dbo.IQAccmst a ON a.Act_Id=ad.Act_Id JOIN {MAIN}.dbo.[Company Master] c ON c.CID='MP' AND c.GSTIN=UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))) COLLATE SQL_Latin1_General_CP1_CI_AS) x",
+    "database": "cross",
+    "counts": {
+      "mbm": 1,
+      "mp": 1
+    },
+    "examples": [
+      "MBM 10439 M G MARKETING has GSTIN 37AHXPB8768N1Z6 = own GSTIN; bills 0"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: what is M G MARKETING's real GSTIN? (No bills yet, so only the master needs fixing.) Counts are per firm."
+  },
+  {
+    "id": "GST07-itc-without-supplier-gstin",
+    "area": "gst",
+    "title": "GST purchases with input tax booked against Cash or a supplier without GSTIN",
+    "severity": "high",
+    "why": "ITC can only be claimed against a supplier GSTIN that appears in GSTR-2B. MBM has 74 GST purchases (input tax about Rs 1.05 lakh) posted to \"Cash on hand\" plus 10 from suppliers without a GSTIN on file although the supplier bill numbers (e.g. GST/2026-27/1305) show registered suppliers.",
+    "detectSql": "SELECT RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' '+CONVERT(char(10),h.Doc_Date,120)+' party '+LTRIM(RTRIM(a.Act_Name))+' ('+a.Act_Type+') supplier bill '+LTRIM(RTRIM(ISNULL(h.Supp_Billno,'')))+' input tax '+CAST(t.tax AS varchar(20)) AS Finding\nFROM IQDoc_Header h JOIN IQAccmst a ON a.Act_Id=h.Act_ID LEFT JOIN IQAccAdr ad ON ad.Act_Id=h.Act_ID\nCROSS APPLY (SELECT SUM(r.TaxValue) tax FROM IQDoc_Recd r WHERE r.Doc_ID=h.Doc_Id) t\nWHERE h.Tt_Id IN (500,501,211) AND t.tax<>0 AND LEN(UPPER(LTRIM(RTRIM(ISNULL(ad.GSTIN,'')))))<>15",
+    "database": "both",
+    "counts": {
+      "mbm": 84,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: GSTPUR/288 2026-10-26 party Cash on hand (Cash) supplier bill 11930 input tax 14461.06",
+      "MBM: GSTPUR/242 2026-09-30 party Cash on hand (Cash) supplier bill 1422 input tax 537.88",
+      "MBM: GSTPUR/278 2026-10-14 party Cash on hand (Cash) supplier bill 317 input tax 475.20",
+      "MBM: GSTPUR/88 2026-06-01 party Cash on hand (Cash) supplier bill CTC/26-27/854 input tax 1384.38",
+      "MP: GSTPUR/14 2026-06-11 party Cash on hand (Cash) supplier bill 269 input tax 909.14"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: \"Who were these suppliers? Should cash purchases from GST suppliers be entered against the supplier account (paid in cash) so ITC matches 2B?\" Re-entering means changing the bill party in HQ (voucher edit), which mk-hq does not automate. Until then these should be excluded from ITC claims."
+  },
+  {
+    "id": "GST08-invoice-number-gaps",
+    "area": "gst",
+    "title": "Missing sales invoice numbers (gaps) in the year's series",
+    "severity": "medium",
+    "why": "GSTR-1 Table 13 (documents issued) must report the series range with cancelled counts; HQ deletes instead of cancelling, and several numbers vanished without even an audit copy (number skipped or typed over).",
+    "detectSql": "SELECT RTRIM(s.TSeries)+'/'+CAST(n.n AS varchar(10))+' missing'+CASE WHEN EXISTS (SELECT 1 FROM User_IQDOC_Header u WHERE u.Tt_Id=s.Tt_Id AND u.TNo=n.n AND u.TaskType=1) THEN ' (deleted; audit copy exists)' WHEN EXISTS (SELECT 1 FROM User_IQDOC_Header u WHERE u.Tt_Id=s.Tt_Id AND u.TNo=n.n) THEN ' (audit copy, no delete record)' ELSE ' (no trace)' END AS Finding\nFROM (SELECT h.Tt_Id, h.TSeries, MIN(h.TNo) lo, MAX(h.TNo) hi FROM IQDoc_Header h WHERE h.Tt_Id IN (506,507,510,511,266,-2) GROUP BY h.Tt_Id, h.TSeries) s\nJOIN (SELECT TOP 20000 ROW_NUMBER() OVER (ORDER BY (SELECT 1)) n FROM sys.all_columns) n ON n.n BETWEEN s.lo AND s.hi\nWHERE NOT EXISTS (SELECT 1 FROM IQDoc_Header h WHERE h.Tt_Id=s.Tt_Id AND h.TSeries=s.TSeries AND h.TNo=n.n)",
+    "database": "both",
+    "counts": {
+      "mbm": 10,
+      "mp": 4
+    },
+    "examples": [
+      "MBM: CS/317 missing (deleted; audit copy exists)",
+      "MBM: CS/318 missing (no trace)",
+      "MBM: CS/319 missing (deleted; audit copy exists)",
+      "MP: GS/2 missing (no trace)",
+      "MP: GS/3 missing (no trace)"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Report only: list these as cancelled in GSTR-1 Table 13 for the month they fall in. Do not renumber issued invoices."
+  },
+  {
+    "id": "GST09-nonstandard-series",
+    "area": "gst",
+    "title": "Bills saved with a series different from their transaction type's series",
+    "severity": "medium",
+    "why": "MBM GST sale 9800 was saved as \"1/1\" instead of CS/...; GSTR-1 will show an invoice \"1\" that collides with the real CS/1 numbering logic and breaks Table 13 ranges.",
+    "detectSql": "SELECT RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' '+CONVERT(char(10),h.Doc_Date,120)+' TT '+CAST(h.Tt_Id AS varchar(6))+' expected series '+RTRIM(t.Series)+' amount '+CAST(h.Bill_Amt AS varchar(20)) AS Finding\nFROM IQDoc_Header h JOIN TTYPES t ON t.TT_ID=h.Tt_Id WHERE h.Tt_Id IN (506,507,510,511,266,-2) AND RTRIM(h.TSeries)<>RTRIM(t.Series)",
+    "database": "both",
+    "counts": {
+      "mbm": 1,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: 1/1 2026-09-15 TT 506 expected series CS amount 750.00"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: \"Was 1/1 (15 Sep, Rs 750) a real GST invoice? Which number should it have?\" If it was printed and given to the customer it must stay as issued and be reported; otherwise re-save with the next CS number in HQ."
+  },
+  {
+    "id": "GST10-sales-changed-after-gstr1",
+    "area": "gst",
+    "title": "Sales bills modified or deleted after that month's GSTR-1 due date (11th of next month)",
+    "severity": "high",
+    "why": "If GSTR-1 was filed from HQ data before the change, the return no longer matches the books; each needs an amendment (Table 9A/9C) or a check that the filed figure was right.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' dated '+CONVERT(char(10),h.Doc_Date,120)+' modified '+CONVERT(char(16),h.Modify_Date,120)+' amount '+CAST(h.Bill_Amt AS varchar(20)) AS Finding FROM IQDoc_Header h WHERE h.Tt_Id IN (506,507,510,511,266,-2) AND h.Modify_Date >= DATEADD(day,10,DATEADD(month,1,DATEFROMPARTS(YEAR(h.Doc_Date),MONTH(h.Doc_Date),1)))\nUNION ALL\nSELECT DISTINCT RTRIM(u.TSeries)+'/'+CAST(u.TNo AS varchar(12))+' dated '+CONVERT(char(10),u.Doc_Date,120)+' DELETED '+CONVERT(char(10),u.Ent_Date,120)+' amount '+CAST(u.Bill_Amt AS varchar(20)) FROM User_IQDOC_Header u WHERE u.TaskType=1 AND u.Tt_Id IN (506,507,510,511,266,-2) AND u.Ent_Date >= DATEADD(day,10,DATEADD(month,1,DATEFROMPARTS(YEAR(u.Doc_Date),MONTH(u.Doc_Date),1)))) x",
+    "database": "both",
+    "counts": {
+      "mbm": 13,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: CS/66 dated 2026-04-22 modified 2026-06-04 11:45 amount 760.00",
+      "MBM: CS/79 dated 2026-04-26 modified 2026-06-21 20:28 amount 4900.00",
+      "MBM: CS/87 dated 2026-04-28 modified 2026-05-27 17:28 amount 2600.00",
+      "MBM: CS/88 dated 2026-04-29 modified 2026-05-28 16:33 amount 26250.00",
+      "MBM: CS/136 dated 2026-05-09 modified 2026-08-05 11:31 amount 1944.00"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Report to the accountant with the filed GSTR-1 for those months. mk-hq should warn before saving into a month whose due date has passed."
+  },
+  {
+    "id": "GST11-duplicate-supplier-bill",
+    "area": "gst",
+    "title": "Same supplier bill number entered twice for one supplier",
+    "severity": "medium",
+    "why": "Probable double entry of a purchase: ITC and payable both doubled. MP has no duplicate check (CF08).",
+    "detectSql": "SELECT LTRIM(RTRIM(a.Act_Name))+' bill '+LTRIM(RTRIM(h.Supp_Billno))+': '+STRING_AGG(RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' '+CONVERT(char(10),h.Doc_Date,120)+' '+CAST(h.Bill_Amt AS varchar(20)),' / ') AS Finding\nFROM IQDoc_Header h JOIN IQAccmst a ON a.Act_Id=h.Act_ID WHERE h.Tt_Id IN (500,501,211) AND ISNULL(LTRIM(RTRIM(h.Supp_Billno)),'') NOT IN ('','0')\nGROUP BY a.Act_Name, LTRIM(RTRIM(h.Supp_Billno)) HAVING COUNT(*)>1",
+    "database": "both",
+    "counts": {
+      "mbm": 2,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: Cash on hand bill 1089: GSTPUR/172 2026-08-15 4331.00 / GSTPUR/196 2026-09-05 4331.00",
+      "MBM: Cash on hand bill 201: GSTPUR/117 2026-07-06 8708.00 / GSTPUR/83 2026-06-04 6336.00",
+      "MP: VENUS CHEMICALS bill 499: GSTPUR/47 2026-08-26 5984.00 / GSTPUR/50 2026-08-29 5984.00"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: \"Are these two separate bills or one bill entered twice?\" Delete the duplicate in HQ if so. MBM's two pairs are on \"Cash on hand\" (different real suppliers can share a number there)."
+  },
+  {
+    "id": "GST12-bill-without-tax-summary",
+    "area": "gst",
+    "title": "GST sale/purchase without its IQDOC_VAT tax-summary row",
+    "severity": "low",
+    "why": "HQ's GST registers and returns read the per-bill summary row; a bill without it is missing from those totals.",
+    "detectSql": "SELECT RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' '+CONVERT(char(10),h.Doc_Date,120)+' TT '+CAST(h.Tt_Id AS varchar(6))+' amount '+CAST(h.Bill_Amt AS varchar(20)) AS Finding FROM IQDoc_Header h WHERE h.Tt_Id IN (500,501,506,507) AND NOT EXISTS (SELECT 1 FROM IQDOC_VAT v WHERE v.Doc_Id=h.Doc_Id)",
+    "database": "both",
+    "counts": {
+      "mbm": 2,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: CS/76 2026-04-25 TT 506 amount 575.00",
+      "MBM: CS/826 2026-10-18 TT 506 amount 900.00"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Open and re-save the bill in HQ (HQ rewrites IQDOC_VAT on save). Not automated: the row's columns are computed by HQ's save routine."
+  },
+  {
+    "id": "GST13-numbering-out-of-date-order",
+    "area": "gst",
+    "title": "Sales invoice number higher than the next one but dated later",
+    "severity": "low",
+    "why": "GST rules expect consecutive serial numbers in issue order; back-dated invoices inside the series are a common audit query.",
+    "detectSql": "SELECT RTRIM(a.TSeries)+'/'+CAST(a.TNo AS varchar(12))+' '+CONVERT(char(10),a.Doc_Date,120)+' > '+RTRIM(b.TSeries)+'/'+CAST(b.TNo AS varchar(12))+' '+CONVERT(char(10),b.Doc_Date,120) AS Finding\nFROM IQDoc_Header a JOIN IQDoc_Header b ON b.Tt_Id=a.Tt_Id AND b.TSeries=a.TSeries AND b.TNo=a.TNo+1 AND b.Doc_Date<a.Doc_Date WHERE a.Tt_Id IN (506,507,510,511,266,-2)",
+    "database": "both",
+    "counts": {
+      "mbm": 4,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: CS/322 2026-06-23 > CS/323 2026-06-22",
+      "MBM: CS/325 2026-06-23 > CS/326 2026-06-22",
+      "MBM: CS/565 2026-08-21 > CS/566 2026-08-20",
+      "MBM: CS/585 2026-08-26 > CS/586 2026-08-23",
+      "MP: GS/74 2026-07-30 > GS/75 2026-07-26"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Report only."
+  },
+  {
+    "id": "AU01-prototype-docs-12h-time",
+    "area": "audit",
+    "title": "Documents created outside HQ (the MK prototype) still carrying 12-hour Bill_Time / Ent_Time",
+    "severity": "medium",
+    "why": "HQ writes Bill_Time and Ent_Time as 24-hour HH:mm:ss. 62 MBM and 1 MP sales orders/GST purchases since 24 Oct were created by the prototype: 7 untouched ones (BillEnteredSystem MK-CORE, ModifyCnt 2, no Modify_Date) still have a 12h Bill_Time; 55+1 were later re-saved in HQ (Bill_Time now 24h) but keep the 12h Ent_Time, and their first User_IQDOC_Header copy shows the 12h Bill_Time. Visibly foreign rows; time-sorted reports mis-order them.",
+    "detectSql": "SELECT RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+' '+CONVERT(char(10),h.Doc_Date,120)+' Bill_Time \"'+ISNULL(h.Bill_Time,'')+'\" Ent_Time \"'+ISNULL(h.Ent_Time,'')+'\" system '+ISNULL(h.BillEnteredSystem,'') AS Finding\nFROM IQDoc_Header h WHERE h.Bill_Time LIKE '%[AP]M' OR h.Ent_Time LIKE '%[AP]M'",
+    "database": "both",
+    "counts": {
+      "mbm": 62,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: SO/392 2026-10-24 Bill_Time \"7:16:48 PM\" Ent_Time \"7:16:48 PM\" system MK-CORE",
+      "MBM: SO/393 2026-10-24 Bill_Time \"19:37:22\" Ent_Time \"7:17:18 PM\" system MK",
+      "MBM: SO/394 2026-10-24 Bill_Time \"19:56:31\" Ent_Time \"7:36:48 PM\" system MK",
+      "MBM: SO/397 2026-10-25 Bill_Time \"18:53:32\" Ent_Time \"5:46:07 PM\" system MK",
+      "MP: GSTPUR/64 2026-11-05 Bill_Time \"09:48:52\" Ent_Time \"9:41:04 AM\" system MK"
+    ],
+    "fix": "auto",
+    "fixSql": "UPDATE IQDoc_Header SET Bill_Time=CONVERT(char(8),CAST(Bill_Time AS time),108) WHERE Bill_Time LIKE '%[AP]M' AND TRY_CAST(Bill_Time AS time) IS NOT NULL;\nUPDATE IQDoc_Header SET Ent_Time=CONVERT(char(8),CAST(Ent_Time AS time),108) WHERE Ent_Time LIKE '%[AP]M' AND TRY_CAST(Ent_Time AS time) IS NOT NULL;",
+    "fixNotes": "Deterministic 12h->24h conversion (7:16:48 PM -> 19:16:48), the format HQ writes. User_IQDOC_Header copies are left untouched (they are history snapshots and the only evidence of origin). BillEnteredSystem MK-CORE is also left; owner may choose to set it to MK. ModifyCnt 2 with NULL Modify_Date on the 7 is not repairable deterministically. mk-hq must keep writing 24h times (Bill_Time and Ent_Time)."
+  },
+  {
+    "id": "AU03-deleted-documents",
+    "area": "audit",
+    "title": "Documents deleted in HQ (audit copy TaskType 1, document gone)",
+    "severity": "low",
+    "why": "Deleted sales/purchases change past returns and stock; owner should see who/when. HQ keeps only these User_IQ* copies; the copies are the reason User_IQ* tables have \"orphan\" Doc_Ids (expected, not corruption).",
+    "detectSql": "SELECT RTRIM(u.TSeries)+'/'+CAST(u.TNo AS varchar(12))+' TT '+CAST(u.Tt_Id AS varchar(6))+' dated '+CONVERT(char(10),u.Doc_Date,120)+' deleted '+CONVERT(char(10),u.Ent_Date,120)+' '+ISNULL(LTRIM(RTRIM(u.ActName)),'')+' '+CAST(u.Bill_Amt AS varchar(20)) AS Finding\nFROM User_IQDOC_Header u WHERE u.TaskType=1 AND NOT EXISTS (SELECT 1 FROM IQDoc_Header h WHERE h.Doc_Id=u.Doc_Id)",
+    "database": "both",
+    "counts": {
+      "mbm": 34,
+      "mp": 9
+    },
+    "examples": [
+      "MBM: GSTPUR/44 TT 500 dated 2026-05-07 deleted 2026-06-09 SRI VENKATA SAI AGENCIES 1700.00",
+      "MBM: GSTPUR/59 TT 500 dated 2026-05-20 deleted 2026-06-09 Cash on hand 1779.00",
+      "MBM: GSTPUR/68 TT 500 dated 2026-05-30 deleted 2026-06-09 CS WATER TAP 5015.00",
+      "MP: GSTPUR/1 TT 500 dated 2026-04-16 deleted 2026-04-24 ASIAN PAINTS 1957.00",
+      "MP: GSTPUR/3 TT 500 dated 2026-04-16 deleted 2026-04-24 ASIAN PAINTS 1957.00"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Report only. Note also that every document has Ent_Uid 1 (everyone works as admin), so the audit trail cannot say who deleted (see AU04)."
+  },
+  {
+    "id": "AU04-users-and-permissions",
+    "area": "audit",
+    "title": "HQ users: one shared admin login, unused test users, permission rows for deleted users",
+    "severity": "medium",
+    "why": "All documents in both firms carry Ent_Uid 1, so the audit trail cannot tell who entered/edited/deleted anything; 9 other users (iq, nag, test, T1...) exist but never saved a document; User_Tasks has rights for UIDs that no longer exist.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT 'User '+CAST(m.UID AS varchar(6))+' '+RTRIM(m.UName)+' ('+RTRIM(m.User_Type)+'): documents MBM '+CAST((SELECT COUNT(*) FROM {MBM}.dbo.IQDoc_Header h WHERE h.Ent_Uid=m.UID) AS varchar(10))+', MP '+CAST((SELECT COUNT(*) FROM {MP}.dbo.IQDoc_Header h WHERE h.Ent_Uid=m.UID) AS varchar(10)) AS Finding FROM {MAIN}.dbo.[User Master] m\nWHERE NOT EXISTS (SELECT 1 FROM {MBM}.dbo.IQDoc_Header h WHERE h.Ent_Uid=m.UID) AND NOT EXISTS (SELECT 1 FROM {MP}.dbo.IQDoc_Header h WHERE h.Ent_Uid=m.UID)\nUNION ALL SELECT 'User_Tasks has '+CAST(COUNT(*) AS varchar(10))+' permission rows for UID '+CAST(t.UID AS varchar(6))+' which is not in User Master' FROM {MAIN}.dbo.User_Tasks t WHERE NOT EXISTS (SELECT 1 FROM {MAIN}.dbo.[User Master] m WHERE m.UID=t.UID) GROUP BY t.UID\nUNION ALL SELECT 'All '+CAST(COUNT(*) AS varchar(10))+' MBM documents were saved as user 1' FROM {MBM}.dbo.IQDoc_Header h HAVING MIN(h.Ent_Uid)=1 AND MAX(h.Ent_Uid)=1\nUNION ALL SELECT 'All '+CAST(COUNT(*) AS varchar(10))+' MP documents were saved as user 1' FROM {MP}.dbo.IQDoc_Header h HAVING MIN(h.Ent_Uid)=1 AND MAX(h.Ent_Uid)=1) x",
+    "database": "cross",
+    "counts": {
+      "mbm": 13,
+      "mp": 13
+    },
+    "examples": [
+      "User 12 iq (User): documents MBM 0, MP 0",
+      "User 14 nag (User): documents MBM 0, MP 0",
+      "User 15 nag1 (User): documents MBM 0, MP 0",
+      "User 16 Tst (User): documents MBM 0, MP 0",
+      "User 17 test (User): documents MBM 0, MP 0"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "{MAIN} = HQ company-master DB. Owner: \"Should each person (you, counter staff) get their own HQ login so bills show who made them? Which of iq/nag/nag1/Tst/test/T1/t2/T3/counter1 can be removed?\" User maintenance is done in HQ's User screen. Orphan User_Tasks rows (UID 13, 40) are harmless; delete only via HQ."
+  },
+  {
+    "id": "SEC01-weak-plaintext-passwords",
+    "area": "other",
+    "title": "HQ login passwords stored in plain text, most identical to the user name",
+    "severity": "high",
+    "why": "Anyone with read access to the SQL server (or a backup) can log in as admin; 7 of 10 HQ users, including admin, have a password equal to the user name. Values are deliberately not printed.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT 'User '+CAST(m.UID AS varchar(6))+' '+RTRIM(m.UName)+': password stored in plain text'+CASE WHEN m.password=m.UName THEN ', same as user name' WHEN LEN(ISNULL(m.password,''))<4 THEN ', shorter than 4 characters' ELSE '' END AS Finding FROM {MAIN}.dbo.[User Master] m WHERE ISNULL(m.password,'')<>''\nUNION ALL SELECT 'SYSPRM (licence record) holds the program user/password in plain text'+CASE WHEN s.Password=s.UserName THEN ', same as user name' ELSE '' END FROM {MAIN}.dbo.SYSPRM s WHERE ISNULL(s.Password,'')<>'') x",
+    "database": "cross",
+    "counts": {
+      "mbm": 11,
+      "mp": 11
+    },
+    "examples": [
+      "User 1 admin: password stored in plain text, same as user name",
+      "User 12 iq: password stored in plain text, same as user name",
+      "User 14 nag: password stored in plain text, same as user name",
+      "User 15 nag1: password stored in plain text, shorter than 4 characters",
+      "User 16 Tst: password stored in plain text, same as user name"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner: change the admin password (and remove test users) from HQ's user screen. HQ compares passwords in plain text, so hashing is not possible without breaking HQ. Never print or export these values."
+  },
+  {
+    "id": "SEC02-plaintext-db-credentials",
+    "area": "other",
+    "title": "SQL Server administrator credentials stored in plain text in HQ tables",
+    "severity": "high",
+    "why": "MAIN.SQLOPT and each firm's VAT_Company (an HQ demo-company row) store a SQL sysadmin login with a weak password; anyone who can read one table gets full control of all databases.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT 'MAIN.SQLOPT: server '+RTRIM(s.Srvr_Name)+' login '+RTRIM(s.Srvr_User)+' with stored password' AS Finding FROM {MAIN}.dbo.SQLOPT s WHERE ISNULL(s.Srvr_Pwd,'')<>''\nUNION ALL SELECT 'MBM.VAT_Company ('+RTRIM(v.CName)+'): stored DB login '+RTRIM(v.Db_useid)+' with password, plus company password' FROM {MBM}.dbo.VAT_Company v WHERE ISNULL(v.db_Password,'')<>'' OR ISNULL(v.Passward,'')<>''\nUNION ALL SELECT 'MP.VAT_Company ('+RTRIM(v.CName)+'): stored DB login '+RTRIM(v.Db_useid)+' with password, plus company password' FROM {MP}.dbo.VAT_Company v WHERE ISNULL(v.db_Password,'')<>'' OR ISNULL(v.Passward,'')<>'') x",
+    "database": "cross",
+    "counts": {
+      "mbm": 3,
+      "mp": 3
+    },
+    "examples": [
+      "MAIN.SQLOPT: server nag login sa with stored password",
+      "MBM.VAT_Company (IQ Demo Company): stored DB login sa with password, plus company password",
+      "MP.VAT_Company (IQ Demo Company): stored DB login sa with password, plus company password"
+    ],
+    "fix": "owner",
+    "fixSql": null,
+    "fixNotes": "Owner/IT: give the sa login a strong password (HQ connects with Windows auth here; check HQ still starts after the change on a copy first). VAT_Company is template residue from \"IQ Demo Company\"; leave it unless HQ support confirms it is unused."
+  },
+  {
+    "id": "SEC03-gsp-credentials",
+    "area": "other",
+    "title": "GST e-filing (GSP/ASP) API credentials stored in the firm databases",
+    "severity": "medium",
+    "why": "GSTAPI_Config holds the GSP account user, passwords and a DSC certificate password (identical in both firms, apparently HQ vendor defaults, session last used July 2025). Existence only; values not printed.",
+    "detectSql": "SELECT 'GSTAPI_Config '+CAST(g.Id AS varchar(6))+' '+RTRIM(g.API_GSP_Name)+': '+CASE WHEN ISNULL(g.AspPassword,'')<>'' THEN 'ASP password, ' ELSE '' END+CASE WHEN ISNULL(g.AspDscPassword,'')<>'' THEN 'DSC password, ' ELSE '' END+CASE WHEN ISNULL(g.AspAccountPassword,'')<>'' THEN 'account password, ' ELSE '' END+'active='+CAST(CAST(g.IsActive AS int) AS varchar(2)) AS Finding FROM GSTAPI_Config g WHERE ISNULL(g.AspPassword,'')<>'' OR ISNULL(g.AspDscPassword,'')<>'' OR ISNULL(g.AspAccountPassword,'')<>''",
+    "database": "both",
+    "counts": {
+      "mbm": 1,
+      "mp": 1
+    },
+    "examples": [
+      "MBM: GSTAPI_Config 1 TAXPROGSP: ASP password, DSC password, account password, active=1",
+      "MP: GSTAPI_Config 1 TAXPROGSP: ASP password, DSC password, account password, active=1"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Report: confirm with HQ support whether these are shop or vendor credentials; restrict SQL read access and backups accordingly."
+  },
+  {
+    "id": "HL01-ledger-missing-account",
+    "area": "structure",
+    "title": "Ledger rows and charge heads posting to an account that does not exist",
+    "severity": "high",
+    "why": "MP charge 73 \"Round Off\" points at account 424, which does not exist in MP, so 58 IQDayBook round-off rows (Apr-Oct 2026, net -2.51) belong to no account: trial balance and P&L silently drop them.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT 'IQDayBook SR '+CAST(d.SR_NO AS varchar(12))+' '+CONVERT(char(10),d.TRDATE,120)+' '+ISNULL(RTRIM(d.Tseries),'')+'/'+CAST(ISNULL(d.Tno,0) AS varchar(12))+' a/c '+CAST(d.Act_ID AS varchar(10))+' missing, '+d.TYPE+' '+CAST(d.AMOUNT AS varchar(20)) AS Finding FROM IQDayBook d WHERE ISNULL(d.Act_ID,0)<>0 AND NOT EXISTS (SELECT 1 FROM IQAccmst a WHERE a.Act_Id=d.Act_ID)\nUNION ALL SELECT 'IQDayBook SR '+CAST(d.SR_NO AS varchar(12))+' contra a/c '+CAST(d.Contra_ID AS varchar(10))+' missing' FROM IQDayBook d WHERE ISNULL(d.Contra_ID,0)<>0 AND NOT EXISTS (SELECT 1 FROM IQAccmst a WHERE a.Act_Id=d.Contra_ID)\nUNION ALL SELECT 'Charge '+CAST(c.Chrg_Id AS varchar(6))+' '+RTRIM(c.Chrg_Name)+' posts to missing a/c '+CAST(c.Act_ID AS varchar(10))+' ('+CAST(COUNT(*) AS varchar(10))+' non-zero bill rows)' FROM IQCHARGES c JOIN IQDoc_Chrgs dc ON dc.Chrg_id=c.Chrg_Id AND dc.Amount<>0 WHERE NOT EXISTS (SELECT 1 FROM IQAccmst a WHERE a.Act_Id=c.Act_ID) GROUP BY c.Chrg_Id, c.Chrg_Name, c.Act_ID) x",
+    "database": "both",
+    "counts": {
+      "mbm": 0,
+      "mp": 59
+    },
+    "examples": [
+      "MP: IQDayBook SR 24847 2026-04-16 GSTPUR/2 a/c 424 missing, D 0.40",
+      "MP: IQDayBook SR 24877 2026-04-17 GSTPUR/4 a/c 424 missing, C 0.27",
+      "MP: IQDayBook SR 24893 2026-04-30 GSTPUR/5 a/c 424 missing, C 0.33",
+      "MP: IQDayBook SR 24903 2026-04-30 GSTPUR/6 a/c 424 missing, C 0.36",
+      "MP: IQDayBook SR 24913 2026-04-30 GSTPUR/7 a/c 424 missing, C 0.10"
+    ],
+    "fix": "auto",
+    "fixSql": "-- Re-points the Round Off head and its postings to the firm's single \"ROUND OFF\" account (MP: 10119, an HQ-created account from 2022, already used by the 5 Nov bill).\n-- This is exactly what HQ would have posted had the head pointed at an existing account; amounts, sides and SR_NOs are unchanged.\nDECLARE @r int = (SELECT MIN(Act_Id) FROM IQAccmst WHERE UPPER(LTRIM(RTRIM(Act_Name)))='ROUND OFF' AND Act_Cat='A' HAVING COUNT(*)=1);\nIF @r IS NOT NULL\nBEGIN\n  UPDATE d SET Act_ID=@r FROM IQDayBook d\n   WHERE NOT EXISTS (SELECT 1 FROM IQAccmst a WHERE a.Act_Id=d.Act_ID)\n     AND EXISTS (SELECT 1 FROM IQDoc_Chrgs c WHERE c.Doc_id=d.Doc_ID AND c.Chrg_id=73 AND c.Act_ID=d.Act_ID);\n  UPDATE c SET Act_ID=@r FROM IQDoc_Chrgs c WHERE c.Chrg_id=73 AND NOT EXISTS (SELECT 1 FROM IQAccmst a WHERE a.Act_Id=c.Act_ID);\n  UPDATE c SET Act_ID=@r FROM User_IQDoc_Chrgs c WHERE c.Chrg_id=73 AND NOT EXISTS (SELECT 1 FROM IQAccmst a WHERE a.Act_Id=c.Act_ID);\n  UPDATE IQCHARGES SET Act_ID=@r WHERE Chrg_Id=73 AND NOT EXISTS (SELECT 1 FROM IQAccmst a WHERE a.Act_Id=IQCHARGES.Act_ID);\nEND",
+    "fixNotes": "Guarded: does nothing unless the firm has exactly one account named ROUND OFF. In MBM the check is already clear (its Round Off head points at 11134). Confirm with the owner that MP round-off should sit in 10119 ROUND OFF (Expense) before running on live; the Add/Less question is CF05. Same rows as config CFG-04 (owner there); this entry adds the guarded, HQ-equivalent repair."
+  },
+  {
+    "id": "HL03-orphan-rows-template",
+    "area": "structure",
+    "title": "Orphan rows referencing items/accounts/documents that do not exist (survey of every Item_ID/Act_ID/Doc_ID column)",
+    "severity": "low",
+    "why": "Systematic sys.columns survey (158 columns per firm). Apart from HL01/HL04/HL06 and the User_IQ* audit copies of deleted documents (expected), every orphan is residue of HQ's demo/template company (identical counts in both firms: budgets, contacts, job cards, vehicles, tax-rate table). None is read by the shop's screens.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT 'IQAccbdg.Act_ID -> IQAccmst: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Act_ID) AS varchar(20))+')' AS Finding FROM IQAccbdg x WHERE ISNULL(x.Act_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQAccmst z WHERE z.Act_Id=x.Act_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'IQAccOthers.ActID -> IQAccmst: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.ActID) AS varchar(20))+')' AS Finding FROM IQAccOthers x WHERE ISNULL(x.ActID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQAccmst z WHERE z.Act_Id=x.ActID) HAVING COUNT(*)>0\nUNION ALL SELECT 'IQDoc_Delv_D.Doc_Id -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_Id) AS varchar(20))+')' AS Finding FROM IQDoc_Delv_D x WHERE ISNULL(x.Doc_Id,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_Id) HAVING COUNT(*)>0\nUNION ALL SELECT 'IQCreditCard.Doc_id -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_id) AS varchar(20))+')' AS Finding FROM IQCreditCard x WHERE ISNULL(x.Doc_id,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_id) HAVING COUNT(*)>0\nUNION ALL SELECT 'IQDinamination.Doc_ID -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_ID) AS varchar(20))+')' AS Finding FROM IQDinamination x WHERE ISNULL(x.Doc_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'IQDoc_Split.Doc_ID -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_ID) AS varchar(20))+')' AS Finding FROM IQDoc_Split x WHERE ISNULL(x.Doc_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'JobCardEntry_Detail.Doc_ID -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_ID) AS varchar(20))+')' AS Finding FROM JobCardEntry_Detail x WHERE ISNULL(x.Doc_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'JobCardEntry_WorkShopOBServ_Detail.Doc_ID -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_ID) AS varchar(20))+')' AS Finding FROM JobCardEntry_WorkShopOBServ_Detail x WHERE ISNULL(x.Doc_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'JobCardEntry_StndChek_Detail.Doc_ID -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_ID) AS varchar(20))+')' AS Finding FROM JobCardEntry_StndChek_Detail x WHERE ISNULL(x.Doc_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'Vehicle_SerivceDetails.Doc_ID -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_ID) AS varchar(20))+')' AS Finding FROM Vehicle_SerivceDetails x WHERE ISNULL(x.Doc_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'TimberDetails_Entry.Doc_ID -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_ID) AS varchar(20))+')' AS Finding FROM TimberDetails_Entry x WHERE ISNULL(x.Doc_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'Vehicles.Act_Id -> IQAccmst: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Act_Id) AS varchar(20))+')' AS Finding FROM Vehicles x WHERE ISNULL(x.Act_Id,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQAccmst z WHERE z.Act_Id=x.Act_Id) HAVING COUNT(*)>0\nUNION ALL SELECT 'Kits_Detail.Item_ID -> IQItems_Mast: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Item_ID) AS varchar(20))+')' AS Finding FROM Kits_Detail x WHERE ISNULL(x.Item_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQItems_Mast z WHERE z.Item_ID=x.Item_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'Sch_Detail_Items.Item_ID -> IQItems_Mast: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Item_ID) AS varchar(20))+')' AS Finding FROM Sch_Detail_Items x WHERE ISNULL(x.Item_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQItems_Mast z WHERE z.Item_ID=x.Item_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'Tax_Rates.Act_ID -> IQAccmst: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Act_ID) AS varchar(20))+')' AS Finding FROM Tax_Rates x WHERE ISNULL(x.Act_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQAccmst z WHERE z.Act_Id=x.Act_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'IQNrMast.Act_ID -> IQAccmst: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Act_ID) AS varchar(20))+')' AS Finding FROM IQNrMast x WHERE ISNULL(x.Act_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQAccmst z WHERE z.Act_Id=x.Act_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'Price_History.Doc_ID -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_ID) AS varchar(20))+')' AS Finding FROM Price_History x WHERE ISNULL(x.Doc_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_ID) HAVING COUNT(*)>0\nUNION ALL SELECT 'Bill_History_Sal.Doc_ID -> IQDoc_Header: '+CAST(COUNT(*) AS varchar(10))+' rows reference missing ids (e.g. '+CAST(MIN(x.Doc_ID) AS varchar(20))+')' AS Finding FROM Bill_History_Sal x WHERE ISNULL(x.Doc_ID,0) NOT IN (0,-1) AND NOT EXISTS (SELECT 1 FROM IQDoc_Header z WHERE z.Doc_Id=x.Doc_ID) HAVING COUNT(*)>0) x",
+    "database": "both",
+    "counts": {
+      "mbm": 18,
+      "mp": 15
+    },
+    "examples": [
+      "MBM: IQAccbdg.Act_ID -> IQAccmst: 900 rows reference missing ids (e.g. 389)",
+      "MBM: IQAccOthers.ActID -> IQAccmst: 470 rows reference missing ids (e.g. 387)",
+      "MBM: IQDoc_Delv_D.Doc_Id -> IQDoc_Header: 44 rows reference missing ids (e.g. 36)",
+      "MP: IQAccbdg.Act_ID -> IQAccmst: 900 rows reference missing ids (e.g. 389)",
+      "MP: IQAccOthers.ActID -> IQAccmst: 470 rows reference missing ids (e.g. 387)"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Report only: HQ never deletes these and has no screen for most of them; deleting would make the databases differ from an HQ-created firm with no benefit. ProfitandLoss/IQbalancesheet/Temp*/TMP* are report scratch tables (rebuilt by HQ) and were excluded."
+  },
+  {
+    "id": "HL05-party-without-address",
+    "area": "structure",
+    "title": "Party accounts without an IQAccAdr (address/GSTIN) row",
+    "severity": "low",
+    "why": "HQ always writes one IQAccAdr row per account; these 133 MBM rows are the Dec-2023 import of old-year parties (names end in -2018/-2019...). Reports joining IQAccAdr drop them; one still has a bill.",
+    "detectSql": "SELECT CAST(a.Act_Id AS varchar(10))+' '+LTRIM(RTRIM(a.Act_Name))+' ('+a.Act_Type+') bills '+CAST((SELECT COUNT(*) FROM IQDoc_Header h WHERE h.Act_ID=a.Act_Id) AS varchar(10)) AS Finding\nFROM IQAccmst a WHERE a.Act_Type IN ('Customer','Supplier','Customer-Supplier') AND NOT EXISTS (SELECT 1 FROM IQAccAdr d WHERE d.Act_Id=a.Act_Id)",
+    "database": "both",
+    "counts": {
+      "mbm": 133,
+      "mp": 0
+    },
+    "examples": [
+      "MBM: 10242 SRI PAPERS PVT Ltd-2013-2014 (Customer) bills 0",
+      "MBM: 10319 GUNA MARKETING-2016 (Supplier) bills 0",
+      "MBM: 10472 INVENTA CHEMICALS-2016 (Customer) bills 0",
+      "MBM: 10659 Mattey srinu-2018 (Customer) bills 0",
+      "MBM: 10775 RAMESH KUMAR JAIN-2019 (Customer) bills 0"
+    ],
+    "fix": "report",
+    "fixSql": null,
+    "fixNotes": "Opening and saving the account in HQ creates the row (HQ's blank encoding, hq-spec-accounts 1.4). Owner may instead deactivate the unused legacy accounts."
+  },
+  {
+    "id": "HL07-hsn-master-junk",
+    "area": "structure",
+    "title": "Demo \"Mobiles\" entries in the HSN master list, and items that picked them",
+    "severity": "medium",
+    "why": "MP's HSN_Master holds 4 HQ demo rows (\"Mobiles\": 1233525, 12345678, 986155, 9862122) that appear in HQ's item HSN drop-down; 4 items were given these codes (3x 1233525 incl. \"PACKING AND FORWORDING\", 1x 986155 on \"Asi acrylic wall putty 20 kgs\"), so their bills report a mobile-phone/invalid HSN. 986155 is 6 digits, so the item-cleanup length check does not catch it. MBM's list is empty.",
+    "detectSql": "SELECT x.Finding FROM (\nSELECT 'HSN_Master '+CAST(m.HSN_ID AS varchar(6))+' '+RTRIM(m.HSN_CODE)+' \"'+RTRIM(m.HSN_DESC)+'\"' AS Finding FROM HSN_Master m WHERE RTRIM(m.HSN_DESC)='Mobiles'\nUNION ALL SELECT 'Item '+CAST(i.Item_ID AS varchar(10))+' \"'+LTRIM(RTRIM(i.Item_Name))+'\" uses demo HSN '+RTRIM(m.HSN_CODE)+' (bill lines: '+CAST((SELECT COUNT(*) FROM IQDoc_Delv d WHERE d.Item_ID=i.Item_ID)+(SELECT COUNT(*) FROM IQDoc_Recd r WHERE r.Item_ID=i.Item_ID) AS varchar(10))+')' FROM IQItems_Mast i JOIN HSN_Master m ON LTRIM(RTRIM(i.HSNCODE))=LTRIM(RTRIM(m.HSN_CODE)) WHERE RTRIM(m.HSN_DESC)='Mobiles') x",
+    "database": "both",
+    "counts": {
+      "mbm": 0,
+      "mp": 8
+    },
+    "examples": [
+      "MP: HSN_Master 1 1233525 \"Mobiles\"",
+      "MP: HSN_Master 2 12345678 \"Mobiles\"",
+      "MP: HSN_Master 3 986155 \"Mobiles\"",
+      "MP: HSN_Master 4 9862122 \"Mobiles\"",
+      "MP: Item 343 \"PACKING AND FORWORDING\" uses demo HSN 1233525 (bill lines: 1)"
+    ],
+    "fix": "owner",
+    "fixSql": "-- Step 2, after the owner has given the 4 items a real HSN (item-cleanup flow / HQ item save):\n-- HQ's HSN Master screen saves by \"Delete from HSN_Master\" and re-inserting the grid (FrmHSNMaster.cs:932), so clearing the grid in HQ is exactly this statement.\nIF NOT EXISTS (SELECT 1 FROM HSN_Master m WHERE EXISTS (SELECT 1 FROM IQItems_Mast i WHERE LTRIM(RTRIM(i.HSNCODE))=LTRIM(RTRIM(m.HSN_CODE))))\n  DELETE FROM HSN_Master WHERE RTRIM(HSN_DESC)='Mobiles' AND NOT EXISTS (SELECT 1 FROM HSN_Master k WHERE RTRIM(k.HSN_DESC)<>'Mobiles');",
+    "fixNotes": "Owner question: \"What HSN should Asi wall piee (3 items) and Asi acrylic wall putty 20 kgs have?\" (putty is usually 3214). Once no item uses the demo codes, the guarded delete is HQ-identical to emptying the HSN master grid and saving; it refuses to run if the list has any non-demo row."
+  }
+]
