@@ -11,7 +11,7 @@ using QRCoder;
 
 namespace MK.Hq.Api;
 
-/// <summary>Runs Gemma extractions in the background (two at a time), so uploads return immediately.</summary>
+/// <summary>Runs bill-photo readings in the background (two at a time), so uploads return immediately.</summary>
 public sealed class CaptureWorker(CaptureService captures, ILogger<CaptureWorker> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -127,7 +127,7 @@ public static class CaptureEndpoints
             return new { url, svg, expiresAt = expires };
         });
 
-        api.MapGet("/settings/ai", (AiSettings s, PhonePairing p) => new { ai = s.View(), phone = new { enabled = p.Enabled, address = p.LanAddress?.ToString(), port = p.Port } });
+        api.MapGet("/settings/ai", (AiSettings s, IBillReader r, PhonePairing p) => new { ai = s.View(), reader = r.Name, phone = new { enabled = p.Enabled, address = p.LanAddress?.ToString(), port = p.Port } });
         api.MapPut("/settings/ai", (AiUpdate body, AiSettings s) => { s.Update(body.ApiKey, body.Model); return s.View(); });
     }
 

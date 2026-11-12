@@ -128,7 +128,14 @@ The audits behind the checks, with the evidence and the HQ source each repair fo
 `python tools/integrity/build_catalogue.py` merges them into the engine's catalogue: duplicates found by two audits
 kept once, partial and per-finding repairs declared, and nothing that needs an unknown value offered as a button.
 
-## Bill photos (Google Gemma 4)
+## Bill photos (Google Antigravity)
+
+Photos are read by **Google Antigravity** (`AntigravityBillReader`), over the same `agy acp` connection and Google sign-in
+as the Assistant, so the shop needs no Gemini API key. Each read is an ACP session of its own in `var\photo-reader`: no MCP
+tools, no file or terminal access, and every permission request refused. The pages go in as ACP image blocks; the prompt
+and the parsing below are unchanged. If Antigravity is not signed in, the photo fails with "not signed in" and is kept:
+sign in from the Assistant panel and press *Read again*. `"Agent": { "ReadPhotos": false }` goes back to Gemma 4 through
+the Gemini API (`GemmaExtractor`, key in Settings), which is what the steps below and the live tests describe.
 
 *Scan bill photo* (F11) takes scanner files (PNG, JPEG, BMP, TIFF), the PC's camera, pasted images, or phone photos sent
 by scanning a QR code. The phone page lives on a second listener on the shop LAN (`PhoneUploadPort`, 47351); it can
@@ -227,7 +234,7 @@ Done: sales (cash, credit, card/UPI modes), IGST bills, estimates/sales orders a
 purchases (with supplier-bill duplicate guard), purchase orders, correcting and deleting any of those (HQ's or MK's,
 with bill-wise settlements carried over or released), cash/bank receipts and payments, credit and debit notes, all with
 bill-wise allocation; correcting and deleting vouchers; items and customers/suppliers (new and changes); drafts, GST
-invoice printing, bill photos (Gemma 4), dashboard, account ledger and cash book, outstanding with ageing, day book,
+invoice printing, bill photos (Antigravity, or Gemma 4), dashboard, account ledger and cash book, outstanding with ageing, day book,
 sales/purchase registers with GST-by-rate (B2B/B2C) and HSN summaries, stock, HQ health, operations journal, and a
 live change feed (the browser refreshes when anyone saves in HQ).
 

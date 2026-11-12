@@ -14,13 +14,13 @@ public sealed record LearnRequest(long DocumentId, string Reference, IReadOnlyLi
 public sealed record LearnedLine(string SourceText, string? Name, long ItemId, long UnitId);
 
 /// <summary>
-/// Photo → Gemma reading → catalogue/party matching → a bill DRAFT for the existing bill editor. A draft is never posted
+/// Photo → AI reading (<see cref="IBillReader"/>) → catalogue/party matching → a bill DRAFT for the existing bill editor. A draft is never posted
 /// by this service: the shop owner reviews it beside the photo and saves it through the normal reviewed path.
 /// Extraction runs in a background queue so phone uploads are ready by the time anyone looks at the screen.
 /// </summary>
 public sealed class CaptureService(
     CaptureStore store,
-    GemmaExtractor extractor,
+    IBillReader extractor,
     Catalogue catalogue,
     FirmRegistry firms,
     FirmProfiles profiles,

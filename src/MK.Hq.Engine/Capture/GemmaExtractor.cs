@@ -28,9 +28,11 @@ public sealed record ExtractionResult(string Model, Extraction Data, long Elapse
 /// so the contract is in the prompt and the reply is parsed defensively: every number must be a plain decimal (Indian
 /// digit grouping accepted), dates must be unambiguous, and anything else becomes null plus a warning — never a guess.
 /// </summary>
-public sealed partial class GemmaExtractor(AiSettings settings, HttpClient http)
+public sealed partial class GemmaExtractor(AiSettings settings, HttpClient http) : IBillReader
 {
     public const long MaxImageBytes = 15 * 1024 * 1024;
+
+    public string Name => "gemma";
 
     public static string ImageType(ReadOnlySpan<byte> bytes)
     {

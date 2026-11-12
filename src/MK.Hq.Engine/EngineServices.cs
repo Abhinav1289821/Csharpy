@@ -35,6 +35,8 @@ public static class EngineServices
         services.AddSingleton<Capture.AiSettings>();
         services.AddSingleton(_ => new Capture.CaptureStore(options.DataDirectory));
         services.AddSingleton(_ => new Capture.GemmaExtractor(_.GetRequiredService<Capture.AiSettings>(), new HttpClient { Timeout = TimeSpan.FromMinutes(3) }));
+        // The API host replaces this with Antigravity unless "Agent": { "ReadPhotos": false }.
+        services.AddSingleton<Capture.IBillReader>(sp => sp.GetRequiredService<Capture.GemmaExtractor>());
         services.AddSingleton<Capture.CaptureService>();
         foreach (var registration in ExtraRegistrations) registration(services);
         return services;

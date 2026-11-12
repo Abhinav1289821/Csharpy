@@ -1,4 +1,4 @@
-// Photo capture: scanner files, webcam, phone (QR). Gemma reads each bill in the background; the result opens as a
+// Photo capture: scanner files, webcam, phone (QR). The AI (Antigravity, or Gemma 4) reads each bill in the background; the result opens as a
 // draft in the normal bill editor, beside the photo. Nothing reaches HQ until the user saves the bill.
 import { get, post, del, api, tokenQuery } from './api.js';
 import { el, toast, modal, confirmBox } from './util.js';
@@ -19,6 +19,9 @@ async function upload(kind, file, captureId = null) {
 
 export async function captureView(root) {
   let kind = localStorage.getItem('mk-capture-kind') || 'purchase';
+  let reader = 'antigravity';
+  try { reader = (await get('/settings/ai')).reader ?? reader; } catch { /* keep the default wording */ }
+  const readerName = reader === 'gemma' ? 'Gemma 4' : 'Antigravity';
   let timer = null;
   const list = el('div', { class: 'stack' });
 
@@ -56,7 +59,7 @@ export async function captureView(root) {
             act('↻ Turn right', () => post(`/${firmId()}/captures/${c.id}/pages/1/rotate?degrees=90`)),
             act('Add page', () => addPage.click()),
             act('Read again', () => post(`/${firmId()}/captures/${c.id}/retry`)),
-            act('Read with larger model', () => post(`/${firmId()}/captures/${c.id}/retry?model=gemma-4-31b-it`)),
+            reader === 'gemma' ? act('Read with larger model', () => post(`/${firmId()}/captures/${c.id}/retry?model=gemma-4-31b-it`)) : null,
             act('Discard', async () => { if (await confirmBox('Discard this photo?', [el('p', {}, 'The photo and its draft are removed. Nothing in HQ changes.')], 'Discard', true)) await del(`/${firmId()}/captures/${c.id}`); }, 'danger'),
           ] : null, addPage)));
   }
@@ -66,7 +69,7 @@ export async function captureView(root) {
     for (const f of files) {
       try { await upload(kind, f); n++; } catch (e) { toast(`${f.name}: ${e.message}`, true); }
     }
-    if (n) toast(`${n} photo${n > 1 ? 's' : ''} sent to Gemma; each opens as a draft when read`);
+    if (n) toast(`${n} photo${n > 1 ? 's' : ''} sent to ${readerName}; each opens as a draft when read`);
     refresh();
   }
 
@@ -112,7 +115,7 @@ export async function captureView(root) {
   }
 
   root.replaceChildren(
-    el('div', { class: 'row spread' }, el('div', {}, el('h1', {}, 'Scan bills'), el('div', { class: 'muted' }, 'Gemma 4 reads the photo; you check it beside the picture and save. Nothing is saved to HQ automatically.')),
+    el('div', { class: 'row spread' }, el('div', {}, el('h1', {}, 'Scan bills'), el('div', { class: 'muted' }, `${readerName} reads the photo; you check it beside the picture and save. Nothing is saved to HQ automatically.`)),
       el('label', { class: 'field' }, el('span', {}, 'These photos are'), el('select', { onchange: (e) => { kind = e.target.value; localStorage.setItem('mk-capture-kind', kind); } },
         KINDS.map(([k, t]) => el('option', { value: k, selected: k === kind }, t))))),
     el('div', { style: { margin: '12px 0' } }, drop, picker), list);
@@ -129,14 +132,18 @@ export async function settingsView(root) {
   const s = await get('/settings/ai');
   const key = el('input', { type: 'password', placeholder: s.ai.keyConfigured ? `Saved key ${s.ai.keyHint} (leave blank to keep)` : 'Paste the Google AI Studio API key', style: { minWidth: '360px' } });
   const model = el('select', {}, s.ai.models.map((m) => el('option', { value: m, selected: m === s.ai.model }, m === 'gemma-4-26b-a4b-it' ? `${m} (fast, default)` : `${m} (larger, for hard handwriting)`)));
-  root.replaceChildren(el('h1', {}, 'Settings'), el('h2', {}, 'AI for bill photos (Google Gemma 4)'),
-    el('div', { class: 'panel stack' },
+  const photos = s.reader === 'antigravity'
+    ? [el('h2', {}, 'AI for bill photos (Google Antigravity)'),
+      el('div', { class: 'panel' }, 'Bill photos are read by Google Antigravity with the same Google sign-in as the Assistant, so no API key is needed. ' +
+        'If a photo says “not signed in”, open the Assistant (Alt+A), press Sign in, then press Read again on the photo.')]
+    : [el('h2', {}, 'AI for bill photos (Google Gemma 4)'), el('div', { class: 'panel stack' },
       el('label', { class: 'field' }, el('span', {}, 'Gemini API key'), key),
       el('label', { class: 'field' }, el('span', {}, 'Model'), model),
       el('div', { class: 'muted' }, `Key ${s.ai.keyConfigured ? 'saved (' + s.ai.source + '), encrypted for this Windows user' : 'not set'}. It never leaves this PC except to Google.`),
       el('div', {}, el('button', { class: 'btn primary', onclick: async () => {
         try { await api('PUT', '/settings/ai', { apiKey: key.value || null, model: model.value }); toast('Saved'); settingsView(root); } catch (e) { toast(e.message, true); }
-      } }, 'Save'))),
+      } }, 'Save')))];
+  root.replaceChildren(el('h1', {}, 'Settings'), ...photos,
     el('h2', {}, 'Phone uploads'),
     el('div', { class: 'panel' }, s.phone.enabled ? `Phones on the shop Wi-Fi reach this PC at ${s.phone.address}:${s.phone.port} (QR codes only; the phone page can upload photos and nothing else). If Windows asks, allow MK Billing on private networks.`
       : 'This PC has no LAN address, so phone upload is off. Connect it to the shop Wi-Fi/LAN and restart.'));

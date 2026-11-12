@@ -31,9 +31,12 @@ var pairing = new PhonePairing(hq);
 builder.Services.AddSingleton(pairing);
 builder.Services.AddHostedService<CaptureWorker>();
 // The assistant: Google Antigravity (agy acp) with MK's tools served at /mcp.
-builder.Services.AddSingleton(builder.Configuration.GetSection("Agent").Get<MK.Hq.Api.Agent.AgentOptions>() ?? new MK.Hq.Api.Agent.AgentOptions());
+var agentOptions = builder.Configuration.GetSection("Agent").Get<MK.Hq.Api.Agent.AgentOptions>() ?? new MK.Hq.Api.Agent.AgentOptions();
+builder.Services.AddSingleton(agentOptions);
 builder.Services.AddSingleton<MK.Hq.Api.Agent.AgentHub>();
 builder.Services.AddSingleton<MK.Hq.Api.Agent.AgentTools>();
+// Bill photos are read by Antigravity as well (the shop's Google sign-in, no API key); ReadPhotos=false keeps Gemma 4.
+if (agentOptions.ReadPhotos) builder.Services.AddSingleton<MK.Hq.Engine.Capture.IBillReader, MK.Hq.Api.Agent.AntigravityBillReader>();
 var mainUrls = builder.Configuration["urls"] ?? "http://127.0.0.1:47320";
 // Phone uploads: a second listener on the shop LAN that serves ONLY the photo page (see CaptureEndpoints.MapPhone).
 builder.WebHost.UseUrls(pairing.Enabled ? $"{mainUrls};http://{pairing.LanAddress}:{pairing.Port}" : mainUrls);
