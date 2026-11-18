@@ -98,6 +98,15 @@ public sealed partial class AgentTools(
             chat.Push(new JsonObject { ["type"] = "tool", ["name"] = name, ["ok"] = false, ["message"] = text });
             log.LogInformation("Agent tool {Tool} failed: {Message}", name, text);
         }
+        catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // Anything else is a bug in a tool (or a timeout inside one). The agent still gets an ordinary tool error to
+            // explain, instead of an HTTP 500 that the MCP client reports as "the mk server is broken" for the whole chat.
+            isError = true;
+            text = "MK Billing could not run this tool (an internal error; details are in MK's log). Tell the user, and do not retry it in a loop.";
+            chat.Push(new JsonObject { ["type"] = "tool", ["name"] = name, ["ok"] = false, ["message"] = text });
+            log.LogError(e, "Agent tool {Tool} crashed", name);
+        }
         return new JsonObject
         {
             ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text }),
@@ -465,17 +474,85 @@ public sealed partial class AgentTools(
     }
 
     // ------------------------------------------------------------------ read-only SQL
-    [GeneratedRegex(@"--[^\n]*|/\*.*?\*/", RegexOptions.Singleline)] private static partial Regex Comments();
-    [GeneratedRegex(@"'(?:[^']|'')*'")] private static partial Regex Strings();
-    [GeneratedRegex(@"\b(insert|update|delete|merge|drop|alter|create|truncate|exec|execute|grant|revoke|deny|into|openrowset|opendatasource|openquery|openxml|bulk|backup|restore|dbcc|shutdown|kill|waitfor|use|declare|set|begin|commit|rollback|save|xp_\w*|sp_\w*)\b", RegexOptions.IgnoreCase)]
+    // Strings, quoted identifiers and comments are recognised in ONE left-to-right pass, the way SQL Server reads them.
+    // Stripping comments first let "SELECT '--'; COMMIT; UPDATE ..." hide everything after the quote from the checks
+    // below while SQL Server ran all of it. The pass must end every token exactly where SQL Server does, or text the
+    // guard thinks is a comment or a string runs as code. Two such gaps were found in a regex version (both checked on
+    // this SQL Server): a "--" comment also ends at a lone carriage return, and /* comments nest (a quote inside one is
+    // not a string). Anything whose reading is doubtful (nesting, stray control characters, an unclosed quote or
+    // comment) is refused outright rather than guessed at.
+    [GeneratedRegex(@"\b(insert|update|delete|merge|drop|alter|create|truncate|exec|execute|grant|revoke|deny|into|openrowset|opendatasource|openquery|openxml|bulk|backup|restore|dbcc|shutdown|kill|waitfor|use|declare|set|begin|commit|rollback|save|writetext|updatetext|enable|disable|send|receive|reconfigure|checkpoint|setuser|revert|raiserror|goto|xp_\w*|sp_\w*" +
+        // Lock hints: a question runs at READ UNCOMMITTED so it never holds up an HQ PC that is saving; TABLOCKX & co. would.
+        @"|tablock|tablockx|xlock|updlock|holdlock|paglock|serializable|repeatableread|readcommittedlock)\b", RegexOptions.IgnoreCase)]
     private static partial Regex Forbidden();
+
+    /// <summary>The statement with strings blanked to '' and quoted identifiers to [x] and comments removed, or the reason
+    /// it cannot be read safely.</summary>
+    private static (string? Bare, string? Problem) Lex(string sql)
+    {
+        var bare = new System.Text.StringBuilder(sql.Length);
+        var i = 0;
+        // Ends a quoted token at its closing character; a doubled closer is an escaped character inside it.
+        int Close(int from, char closer)
+        {
+            for (var j = from; j < sql.Length; j++)
+            {
+                if (sql[j] != closer) continue;
+                if (j + 1 < sql.Length && sql[j + 1] == closer) { j++; continue; }
+                return j;
+            }
+            return -1;
+        }
+        while (i < sql.Length)
+        {
+            var ch = sql[i];
+            var next = i + 1 < sql.Length ? sql[i + 1] : '\0';
+            if (ch < ' ' && ch is not ('\t' or '\r' or '\n')) return (null, "Control characters are not allowed in a query");
+            if (ch is '\'' or '[' or '"')
+            {
+                var end = Close(i + 1, ch == '[' ? ']' : ch);
+                if (end < 0) return (null, "Unclosed quote or bracket");
+                bare.Append(ch == '\'' ? "''" : "[x]");
+                i = end + 1;
+            }
+            else if (ch == '-' && next == '-')
+            {
+                // SQL Server ends a line comment at CR as well as LF.
+                while (i < sql.Length && sql[i] is not ('\r' or '\n')) i++;
+                bare.Append(' ');
+            }
+            else if (ch == '/' && next == '*')
+            {
+                // Scanned character by character as SQL Server does, so "/*/" opens a nested comment rather than closing one.
+                var j = i + 2;
+                while (j < sql.Length && !(sql[j] == '*' && j + 1 < sql.Length && sql[j + 1] == '/'))
+                {
+                    if (sql[j] == '/' && j + 1 < sql.Length && sql[j + 1] == '*') return (null, "Nested /* comments are not allowed");
+                    j++;
+                }
+                if (j >= sql.Length) return (null, "Unclosed /* comment");
+                bare.Append(' ');
+                i = j + 2;
+            }
+            else { bare.Append(ch); i++; }
+        }
+        return (bare.ToString().Trim(), null);
+    }
+
+    /// <summary>Why <paramref name="sql"/> is not a single read-only SELECT, or null when db_query may run it.</summary>
+    public static string? RejectReason(string sql)
+    {
+        var (bare, problem) = Lex(sql);
+        if (problem is not null) return problem;
+        if (!Regex.IsMatch(bare!, @"^(select|with)\b", RegexOptions.IgnoreCase)) return "Only a SELECT (or WITH … SELECT) is allowed";
+        if (bare!.TrimEnd(';', ' ', '\n', '\r', '\t').Contains(';')) return "One statement only (no semicolons)";
+        if (Forbidden().Match(bare) is { Success: true } bad) return $"'{bad.Value}' is not allowed in a read-only query";
+        return null;
+    }
 
     private static async Task<object> QueryAsync(HqFirm firm, string sql, CancellationToken ct)
     {
-        var bare = Strings().Replace(Comments().Replace(sql, " "), "''").Trim();
-        if (!Regex.IsMatch(bare, @"^(select|with)\b", RegexOptions.IgnoreCase)) throw new ToolError("Only a SELECT (or WITH … SELECT) is allowed");
-        if (bare.TrimEnd(';', ' ', '\n', '\r', '\t').Contains(';')) throw new ToolError("One statement only (no semicolons)");
-        if (Forbidden().Match(bare) is { Success: true } bad) throw new ToolError($"'{bad.Value}' is not allowed in a read-only query");
+        if (RejectReason(sql) is { } why) throw new ToolError(why);
 
         await using var s = await firm.OpenAsync(ct);
         // Dirty reads: a question must never wait for (or hold up) an HQ PC that is saving. Rolled back regardless.
@@ -489,7 +566,8 @@ public sealed partial class AgentTools(
             var more = false;
             while (await reader.ReadAsync(ct))
             {
-                if (rows.Count == 200) { more = true; break; }
+                // Cancel before the reader is disposed, or SqlClient first drains the rest of a huge result set.
+                if (rows.Count == 200) { more = true; cmd.Cancel(); break; }
                 var row = new object?[reader.FieldCount];
                 for (var i = 0; i < row.Length; i++)
                     row[i] = reader.IsDBNull(i) ? null : reader.GetValue(i) switch { string t => t.Trim(), DateTime d => d.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture), byte[] => "(binary)", var v => v };

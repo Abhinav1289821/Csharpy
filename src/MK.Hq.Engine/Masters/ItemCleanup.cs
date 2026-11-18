@@ -138,6 +138,16 @@ public sealed class ItemCleanupService
         await using var s = await firm.OpenAsync(ct);
         var groups = (await s.QueryAsync<(long Id, string Name)>("SELECT CAST(Grp_ID AS bigint), LTRIM(RTRIM(Grp_Name)) FROM dbo.IQGroups"))
             .GroupBy(g => g.Name.ToUpperInvariant()).ToDictionary(g => g.Key, g => g.First().Id);
+        return Import(firmId, file, groups);
+    }
+
+    /// <summary>The cleanup.db side of <see cref="ImportAsync"/>, given HQ's item groups (upper-case name → id).</summary>
+    public CleanupSummary Import(string firmId, CleanupFile file, IReadOnlyDictionary<string, long> groups)
+    {
+        _firms.Get(firmId);
+        Guard.Require(string.Equals(file.Firm, firmId, StringComparison.OrdinalIgnoreCase), "CLEANUP_WRONG_FIRM",
+            $"This list is for {file.Firm}; choose that firm first");
+        Guard.Require(file.Items.Count > 0, "CLEANUP_EMPTY", "The list has no items");
 
         using var cn = Open();
         using var tx = cn.BeginTransaction();
@@ -148,13 +158,23 @@ public sealed class ItemCleanupService
             var json = JsonSerializer.Serialize(p, Json);
             existing.TryGetValue(p.Id, out var old);
             if (old.Status is "applied" && old.Proposal is not null) continue; // done; a fresh list made after applying will show its new name
-            var decision = FromExcel(p, groups);
-            if (decision is null && old.Decision is not null && old.Proposal is not null && Same(old.Proposal, p)) decision = JsonSerializer.Deserialize<CleanupDecision>(old.Decision, Json);
+            // Answers on screen still hold for an unchanged proposal; what the Excel sheet answers replaces them field by
+            // field (a blank Excel column must not wipe an answer he gave on screen).
+            var screen = old.Decision is not null && old.Proposal is not null && Same(old.Proposal, p)
+                ? JsonSerializer.Deserialize<CleanupDecision>(old.Decision, Json)
+                : null;
+            var decision = Merge(screen, FromExcel(p, groups));
             cn.Execute("""
                 INSERT INTO cleanup_items(firm, item_id, proposal, decision, status, message, updated_at) VALUES (@firmId, @id, @json, @decision, 'open', NULL, @now)
                 ON CONFLICT(firm, item_id) DO UPDATE SET proposal=excluded.proposal, decision=excluded.decision, status='open', message=NULL, updated_at=excluded.updated_at
                 """, new { firmId, id = p.Id, json, decision = decision is null ? null : JsonSerializer.Serialize(decision, Json), now = Now() }, tx);
         }
+        // Items the fresh list no longer has (renamed or fixed in HQ meanwhile, or dropped by the proposer) keep their old
+        // answers only for the record: left 'open', the next "Write to HQ" would still write those stale answers.
+        var listed = file.Items.Select(p => p.Id).ToHashSet();
+        foreach (var gone in existing.Values.Where(x => !listed.Contains(x.Id) && x.Status is not ("applied" or "undone" or "withdrawn")))
+            cn.Execute("UPDATE cleanup_items SET status='withdrawn', message=@message, updated_at=@now WHERE firm=@firmId AND item_id=@id",
+                new { firmId, id = gone.Id, message = "Not in the latest list", now = Now() }, tx);
         cn.Execute("""
             INSERT INTO cleanup_files(firm, generated, rules, imported_at) VALUES (@firmId, @generated, @rules, @now)
             ON CONFLICT(firm) DO UPDATE SET generated=excluded.generated, rules=excluded.rules, imported_at=excluded.imported_at
@@ -169,25 +189,74 @@ public sealed class ItemCleanupService
         return o.Current == p.Current && o.Proposed == p.Proposed && o.Hsn == p.Hsn && o.Gst == p.Gst && o.GroupId == p.GroupId;
     }
 
-    /// <summary>Answers the owner wrote in the review sheet's blue columns.</summary>
-    private static CleanupDecision? FromExcel(CleanupProposal p, IReadOnlyDictionary<string, long> groups)
+    /// <summary>Answers the owner wrote in the review sheet's blue columns; null when he wrote none. A value MK cannot use
+    /// (a misspelt group, a 5-digit HSN, an unknown GST rate) stops the import naming the item, rather than being dropped
+    /// silently or written to HQ as typed.</summary>
+    public static CleanupDecision? FromExcel(CleanupProposal p, IReadOnlyDictionary<string, long> groups)
     {
         if (p.Answers is not { Count: > 0 } a) return null;
+        var at = $"Item {p.Code} ({p.Current}): ";
         string? Get(string k) => a.TryGetValue(k, out var v) && !string.IsNullOrWhiteSpace(v) ? v.Trim() : null;
-        bool? YesNo(string k) => Get(k)?.ToUpperInvariant() switch { "Y" or "YES" => true, "N" or "NO" => false, _ => null };
-        var approve = YesNo("approve");
-        var own = Get("ownName")?.ToUpperInvariant();
-        var keep = YesNo("keepActive");
-        var move = Get("moveToGroup");
-        decimal? gst = decimal.TryParse(Get("setGst")?.TrimEnd('%'), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var g) ? g : null;
-        return new CleanupDecision
+        bool? YesNo(string k, string column)
         {
-            Name = own ?? (approve == true ? p.Proposed : null),
-            KeepName = own is null && approve == false,
-            Retire = keep is null ? null : !keep.Value,
-            GroupId = move is not null && groups.TryGetValue(move.ToUpperInvariant(), out var id) ? id : null,
-            Hsn = Get("setHsn"), Gst = gst, Source = "excel",
+            var v = Get(k);
+            return v?.ToUpperInvariant() switch
+            {
+                null => null,
+                "Y" or "YES" => true,
+                "N" or "NO" => false,
+                _ => throw HqException.Invalid("CLEANUP_EXCEL_ANSWER", $"{at}'{v}' in '{column}' is not Y or N"),
+            };
+        }
+        var approve = YesNo("approve", "Approve");
+        var own = Get("ownName") is { } typed ? Checked(typed, at) : null;
+        var keep = YesNo("keepActive", "Keep active");
+        long? group = null;
+        if (Get("moveToGroup") is { } move)
+            group = groups.TryGetValue(move.ToUpperInvariant(), out var id) ? id
+                : throw HqException.Invalid("CLEANUP_EXCEL_ANSWER", $"{at}there is no group '{move}' in HQ");
+        var hsn = Get("setHsn");
+        if (hsn is not null) Guard.Require(HsnShape(hsn), "CLEANUP_EXCEL_ANSWER", $"{at}HSN '{hsn}' must have 4, 6 or 8 digits");
+        decimal? gst = null;
+        if (Get("setGst") is { } rate)
+        {
+            gst = decimal.TryParse(rate.TrimEnd('%').Trim(), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var g) && ItemMasterService.Rates.Contains(g)
+                ? g : throw HqException.Invalid("CLEANUP_EXCEL_ANSWER", $"{at}GST '{rate}' is not a rate HQ knows");
+        }
+        var name = own ?? (approve == true ? p.Proposed : null);
+        var keepName = own is null && approve == false;
+        if (name is null && !keepName && keep is null && group is null && hsn is null && gst is null) return null;
+        return new CleanupDecision { Name = name, KeepName = keepName, Retire = keep is null ? null : !keep.Value, GroupId = group, Hsn = hsn, Gst = gst, Source = "excel" };
+    }
+
+    /// <summary>Answers kept from the screen, overridden field by field by what the Excel sheet answers.</summary>
+    public static CleanupDecision? Merge(CleanupDecision? screen, CleanupDecision? excel)
+    {
+        if (excel is null) return screen;
+        if (screen is null) return excel;
+        var nameAnswered = excel.Name is not null || excel.KeepName;
+        var dataAnswered = excel.Hsn is not null || excel.Gst is not null;
+        return screen with
+        {
+            Name = nameAnswered ? excel.Name : screen.Name,
+            KeepName = nameAnswered ? excel.KeepName : screen.KeepName,
+            Retire = excel.Retire ?? screen.Retire,
+            GroupId = excel.GroupId ?? screen.GroupId,
+            GroupLeave = excel.GroupId is null && screen.GroupLeave,
+            Hsn = excel.Hsn ?? screen.Hsn,
+            Gst = excel.Gst ?? screen.Gst,
+            DataLeave = !dataAnswered && screen.DataLeave,
+            Source = "excel",
         };
+    }
+
+    private static bool HsnShape(string hsn) => System.Text.RegularExpressions.Regex.IsMatch(hsn, @"^(\d{4}|\d{6}|\d{8})$");
+
+    /// <summary>A name the owner typed, as the item save will take it (HQ's item screen rules, upper case).</summary>
+    private static string Checked(string name, string at = "")
+    {
+        try { return HqForm.Text(name.Trim().ToUpperInvariant(), "item name", 70, required: true, apostrophe: true); }
+        catch (HqException e) { throw HqException.Invalid(e.Code, at + e.Message); }
     }
 
     // ------------------------------------------------------------------ reading
@@ -239,7 +308,8 @@ public sealed class ItemCleanupService
         var file = cn.QueryFirstOrDefault<(string? Generated, string Rules)?>("SELECT generated, rules FROM cleanup_files WHERE firm=@firmId", new { firmId });
         var titles = file is null ? new Dictionary<string, string>() : JsonSerializer.Deserialize<Dictionary<string, string>>(file.Value.Rules, Json)!;
         var rules = RuleDecisions(firmId, cn);
-        var items = Items(firmId, cn, rules);
+        // Withdrawn items (not in the latest list) are kept only for the record.
+        var items = Items(firmId, cn, rules).Where(i => i.Status is not "withdrawn").ToList();
         var live = items.Where(i => i.Status is not "applied").ToList();
         int Unanswered(Func<CleanupItem, bool> belongs, Func<CleanupItem, bool> answered) => live.Count(i => belongs(i) && !answered(i));
         static bool Review(CleanupItem i) => i.Proposal.Check == "Review" && i.Proposal.Proposed is not null;
@@ -278,7 +348,7 @@ public sealed class ItemCleanupService
         var rules = RuleDecisions(firmId, cn);
         var items = Items(firmId, cn, rules);
         if (ids is { Count: > 0 }) return items.Where(i => ids.Contains(i.Proposal.Id)).ToList();
-        var live = items.Where(i => i.Status is not ("applied" or "undone"));
+        var live = items.Where(i => i.Status is not ("applied" or "undone" or "withdrawn"));
         IEnumerable<CleanupItem> pick = stage switch
         {
             "automatic" => live.Where(i => i.Proposal.Check == "Automatic").OrderByDescending(i => i.Proposal.Sold12),
@@ -308,6 +378,7 @@ public sealed class ItemCleanupService
             var row = cn.QueryFirstOrDefault<(string Proposal, string? Decision, string Status)?>("SELECT proposal, decision, status FROM cleanup_items WHERE firm=@firmId AND item_id=@id", new { firmId, id }, tx)
                 ?? throw HqException.NotFound("CLEANUP_ITEM", $"Item {id} is not in the list");
             Guard.Require(row.Status is not "applied", "CLEANUP_APPLIED", "This item is already written to HQ; load a fresh list to change it again", FailureKind.Conflict);
+            Guard.Require(row.Status is not "withdrawn", "CLEANUP_WITHDRAWN", "This item is not in the latest list (it changed in HQ or needs no change); nothing to answer", FailureKind.Conflict);
             var old = row.Decision is null ? new CleanupDecision() : JsonSerializer.Deserialize<CleanupDecision>(row.Decision, Json)!;
             var merged = old with
             {
@@ -316,12 +387,10 @@ public sealed class ItemCleanupService
                 Hsn = d.DataLeave ? null : d.Hsn ?? old.Hsn, Gst = d.DataLeave ? null : d.Gst ?? old.Gst, DataLeave = d.DataLeave || (d.Hsn is null && d.Gst is null && old.DataLeave),
                 Source = "screen",
             };
-            if (merged.Name is { } n)
-            {
-                Guard.Require(n.Trim().Length is > 0 and <= 70, "MASTER_FIELD_TOO_LONG", "A name has 1 to 70 characters");
-                merged = merged with { Name = n.Trim().ToUpperInvariant() };
-            }
-            if (merged.Hsn is { } h) Guard.Require(System.Text.RegularExpressions.Regex.IsMatch(h, @"^(\d{4}|\d{6}|\d{8})$"), "CLEANUP_HSN", "An HSN code has 4, 6 or 8 digits");
+            // The item save's own rules, checked now: a name it would refuse (a Telugu letter, a leading quote) is better
+            // caught while he is answering than as a "failed" item halfway through writing to HQ.
+            if (merged.Name is { } n) merged = merged with { Name = Checked(n) };
+            if (merged.Hsn is { } h) Guard.Require(HsnShape(h), "CLEANUP_HSN", "An HSN code has 4, 6 or 8 digits");
             if (merged.Gst is { } g) Guard.Require(ItemMasterService.Rates.Contains(g), "ITEM_GST_RATE", "Choose a GST rate HQ knows");
             cn.Execute("UPDATE cleanup_items SET decision=@json, status=CASE WHEN status IN ('skipped','failed','undone') THEN 'open' ELSE status END, message=NULL, updated_at=@now WHERE firm=@firmId AND item_id=@id",
                 new { firmId, id, json = JsonSerializer.Serialize(merged, Json), now = Now() }, tx);

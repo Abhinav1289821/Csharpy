@@ -102,11 +102,13 @@ public static class PlanHash
         {
             w.WriteStartObject();
             w.WriteString("purpose", plan.Purpose);
+            // Hashed as the executor and HqDocumentLock take them (distinct, sorted): listing the same locks in another order
+            // is the same write and must not read as "changed since review".
             w.WriteStartArray("locks");
-            foreach (var l in plan.Locks) w.WriteStringValue(l);
+            foreach (var l in plan.Locks.Distinct().Order(StringComparer.Ordinal)) w.WriteStringValue(l);
             w.WriteEndArray();
             w.WriteStartArray("docLocks");
-            foreach (var d in plan.HqDocumentLocks) w.WriteNumberValue(d);
+            foreach (var d in plan.HqDocumentLocks.Distinct().Order()) w.WriteNumberValue(d);
             w.WriteEndArray();
             w.WriteStartArray("steps");
             foreach (var step in plan.Steps) WriteStep(w, step);
@@ -127,6 +129,7 @@ public static class PlanHash
                 w.WriteString("proc", c.Procedure);
                 WriteArgs(w, "args", c.Args);
                 if (c.Capture is not null) WriteArgs(w, "capture", c.Capture.ToDictionary(k => k.Key, k => (object?)k.Value));
+                if (c.ReadCommitted) w.WriteBoolean("readCommitted", true);
                 break;
             case SqlStep s:
                 w.WriteString("sql", s.Sql);
@@ -155,24 +158,47 @@ public static class PlanHash
     private static void WriteArgs(Utf8JsonWriter w, string name, IReadOnlyDictionary<string, object?> args)
     {
         w.WriteStartObject(name);
-        foreach (var (key, value) in args.OrderBy(a => a.Key, StringComparer.OrdinalIgnoreCase)) w.WriteString(key, Text(value));
+        // ThenBy(Ordinal): two keys that differ only in case would otherwise keep insertion order, and the hash would
+        // depend on how the dictionary was filled rather than on what it holds.
+        foreach (var (key, value) in args.OrderBy(a => a.Key, StringComparer.OrdinalIgnoreCase).ThenBy(a => a.Key, StringComparer.Ordinal))
+            w.WriteString(key, Text(value));
         w.WriteEndObject();
     }
 
+    /// <summary>
+    /// Canonical text of one plan value. Equal values bind equally (1.0 = 1.00 = 1; a DateOnly = that day's midnight;
+    /// 'Y' = "Y"), so they hash equal; any difference that reaches HQ changes the text. Never culture-dependent.
+    /// </summary>
     public static string Text(object? value) => value switch
     {
-        null => "null",
+        null or DBNull => "null",
         string s => "s:" + s,
-        decimal d => "n:" + d.ToString("0.############", CultureInfo.InvariantCulture),
-        double d => "n:" + ((decimal)d).ToString("0.############", CultureInfo.InvariantCulture),
-        int or long or short or byte => "n:" + Convert.ToString(value, CultureInfo.InvariantCulture),
+        char c => "s:" + c,
+        // Every digit counts: the old "0.############" rounded to 12 places, so two amounts differing beyond that hashed equal
+        // although SQL Server can round them to different stored values.
+        decimal d => "n:" + Number(d),
+        // A double goes to SQL Server as its binary value (HqForm.FloatToNumeric relies on that), so hash its exact round-trip
+        // text: (decimal)d rounded to 15 digits and threw on NaN/Infinity.
+        double d => "n:" + (d == 0 ? "0" : d.ToString("R", CultureInfo.InvariantCulture)),
+        float f => Text((double)f),
+        int or long or short or byte or sbyte or ushort or uint or ulong => "n:" + Convert.ToString(value, CultureInfo.InvariantCulture),
         bool b => b ? "n:1" : "n:0",
-        DateOnly d => "d:" + d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-        DateTime d => "d:" + d.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture),
+        DateOnly d => Text(d.ToDateTime(TimeOnly.MinValue)),
+        // Full tick precision and no Kind: SQL Server stores no kind, and datetime2 keeps more than milliseconds.
+        DateTime d => "d:" + d.ToString("yyyy-MM-ddTHH:mm:ss.fffffff", CultureInfo.InvariantCulture),
+        byte[] bytes => "b:" + Convert.ToHexString(bytes),
         Ref r => r.ToString(),
         Clock c => c.ToString(),
         Interp i => i.ToString(),
-        _ => "?:" + value,
+        _ => "?:" + Convert.ToString(value, CultureInfo.InvariantCulture),
     };
+
+    /// <summary>All significant digits, no trailing zeros, no exponent, "0" for any zero (decimal keeps a sign on -0.00).</summary>
+    private static string Number(decimal d)
+    {
+        var s = d.ToString(CultureInfo.InvariantCulture);
+        if (s.Contains('.')) s = s.TrimEnd('0').TrimEnd('.');
+        return s is "-0" ? "0" : s;
+    }
 }
 

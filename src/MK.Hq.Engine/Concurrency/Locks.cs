@@ -9,12 +9,21 @@ namespace MK.Hq.Engine.Concurrency;
 /// <summary>Async mutual exclusion per key inside this process (reference-counted, no leaks).</summary>
 public sealed class KeyedAsyncLock
 {
+    // Users is only read or changed under _sync. A lock-free version (AddOrUpdate + Interlocked) let a releaser drop the
+    // entry to 0 and remove it just after a new caller had re-incremented it, so a third caller created a second
+    // semaphore for the same key and two callers ran "exclusively" at once.
     private sealed class Entry { public readonly SemaphoreSlim Gate = new(1, 1); public int Users; }
-    private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly object _sync = new();
 
     public async Task<IAsyncDisposable> AcquireAsync(string key, TimeSpan timeout, CancellationToken ct = default)
     {
-        var entry = _entries.AddOrUpdate(key, _ => new Entry { Users = 1 }, (_, e) => { Interlocked.Increment(ref e.Users); return e; });
+        Entry entry;
+        lock (_sync)
+        {
+            if (!_entries.TryGetValue(key, out entry!)) _entries[key] = entry = new Entry();
+            entry.Users++;
+        }
         bool entered;
         try { entered = await entry.Gate.WaitAsync(timeout, ct); }
         catch { Release(key, entry, false); throw; }
@@ -29,7 +38,10 @@ public sealed class KeyedAsyncLock
     private void Release(string key, Entry entry, bool held)
     {
         if (held) entry.Gate.Release();
-        if (Interlocked.Decrement(ref entry.Users) == 0) _entries.TryRemove(KeyValuePair.Create(key, entry));
+        lock (_sync)
+        {
+            if (--entry.Users == 0) _entries.Remove(key);
+        }
     }
 
     private sealed class Releaser(Action release) : IAsyncDisposable
@@ -61,18 +73,30 @@ public sealed class FileLease : IAsyncDisposable
             try
             {
                 var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 256, FileOptions.DeleteOnClose);
-                var owner = Encoding.UTF8.GetBytes($"{Environment.MachineName} pid={Environment.ProcessId} key={key} at={DateTime.UtcNow:O}");
-                stream.SetLength(0);
-                await stream.WriteAsync(owner, ct);
-                await stream.FlushAsync(ct);
+                try
+                {
+                    var owner = Encoding.UTF8.GetBytes($"{Environment.MachineName} pid={Environment.ProcessId} key={key} at={DateTime.UtcNow:O}");
+                    stream.SetLength(0);
+                    await stream.WriteAsync(owner, ct);
+                    await stream.FlushAsync(ct);
+                }
+                catch
+                {
+                    // Opened but not handed out (cancelled, disk full): close it now. Left to the finalizer, the exclusive
+                    // handle kept this operation "busy" for every later attempt, including this loop's own retries.
+                    await stream.DisposeAsync();
+                    throw;
+                }
                 return new FileLease(stream, key);
             }
-            catch (IOException) when (clock.Elapsed < timeout)
+            // UnauthorizedAccessException: the previous holder just closed its delete-on-close handle and Windows reports
+            // the file as "delete pending" (ERROR_ACCESS_DENIED) for a moment. It is the same "busy" state as a sharing violation.
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException && clock.Elapsed < timeout)
             {
                 await Task.Delay(delay, ct);
                 delay = Math.Min(delay * 2, 250);
             }
-            catch (IOException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 throw HqException.Conflict("OPERATION_BUSY", "Another MK window on this PC is saving the same thing; try again in a moment");
             }
@@ -113,7 +137,7 @@ public sealed class HqDocumentLock : IAsyncDisposable
                 {
                     held.Add((new FileStream(path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read), path));
                 }
-                catch (IOException)
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 {
                     throw HqException.Conflict("HQ_DOCUMENT_LOCKED",
                         "This document is open for editing in HQ (or another MK window). Close it there and try again.", new { documentId = id });
@@ -133,7 +157,8 @@ public sealed class HqDocumentLock : IAsyncDisposable
         foreach (var (stream, path) in _held)
         {
             stream.Dispose();
-            try { File.Delete(path); } catch (IOException) { /* HQ will reuse or replace it */ }
+            // Never throw from here: this runs after COMMIT, and an exception would report a saved bill as failed.
+            try { File.Delete(path); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* HQ will reuse or replace it */ }
         }
         _held.Clear();
         return ValueTask.CompletedTask;

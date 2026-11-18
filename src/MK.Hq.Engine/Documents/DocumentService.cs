@@ -37,11 +37,13 @@ public sealed class DocumentService(
     public async Task<DocumentReceipt> PostAsync(string firmId, PostRequest post, CancellationToken ct = default)
     {
         var firm = firms.Get(firmId);
-        var profile = await profiles.GetAsync(firm, ct);
         var receipt = await coordinator.RunAsync(new WriteRequest<DocumentReceipt>(
             firm, post.OperationId, "document.create." + post.Document.Kind, RequestHash(post), [],
             async session =>
             {
+                // Settings read inside the write transaction: a cached copy could be up to 30 s old, and the plan-hash check
+                // could not then notice a settings change (round-off type, charge accounts) made since the review.
+                var profile = await FirmProfiles.LoadAsync(firm, session);
                 var resolved = await resolver.ResolveAsync(session, profile, post.Document);
                 var plan = DocumentPlanBuilder.Create(resolved, options.HqUserId, options.EffectiveMachineName);
                 Guard.Require(plan.Hash == post.ExpectedHash, "REVIEW_CHANGED",

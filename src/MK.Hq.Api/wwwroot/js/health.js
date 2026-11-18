@@ -23,6 +23,11 @@ export async function healthView(root) {
   const decisions = findings.filter((f) => f.check.fix === 'owner' && f.count > 0);
   const rows = [];
   let selected = 0;
+  // A failed re-check (service stopped) says why instead of leaving "Checking HQ…" with no word.
+  const recheck = () => healthView(root).catch((e) => {
+    toast(e.message, true);
+    if (root.isConnected) root.replaceChildren(el('h1', {}, 'Data health'), el('p', { class: 'issue err' }, e.message));
+  });
 
   const open = new Set();
   // Automatic repairs confirm the count; decision repairs put the question first and need an explicit yes.
@@ -65,7 +70,7 @@ export async function healthView(root) {
       const r = await post(`/${firmId()}/health/${encodeURIComponent(f.check.id)}/repair`,
         { operationId: opId(), expectedHash: p.hash, decided: decide, key: which?.value ?? null, choice: choice?.value || null });
       toast(`${r.message}: ${f.check.title}`);
-      healthView(root);
+      recheck();
     } catch (e) { toast(e.message, true); }
   };
 
@@ -111,10 +116,15 @@ export async function healthView(root) {
       el('div', {}, el('h1', {}, 'Data health'),
         el('p', { class: 'muted' }, `${state.firm.name} · checked ${new Date(report.checkedAt).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' })} · `
           + `${n(repairs.length)} kinds of problem MK can repair · ${n(decisions.length)} need your decision`)),
-      el('button', { class: 'btn', onclick: () => healthView(root) }, 'Check again (C)')),
+      el('button', { class: 'btn', onclick: () => recheck() }, 'Check again (C)')),
     contract.findings.filter((f) => f.severity !== 'ok' && f.title === 'HQ procedure contract').map((f) => el('div', { class: 'issue err' }, `${f.title}: ${f.detail} `,
       el('button', { class: 'btn small danger', onclick: async () => {
-        if (await confirmBox('Accept the new HQ procedures?', [el('p', {}, 'Only do this after the parity tests pass against the updated HQ.')], 'Accept', true)) { await post(`/${firmId()}/contract/accept`); healthView(root); }
+        try {
+          if (!await confirmBox('Accept the new HQ procedures?', [el('p', {}, 'Only do this after the parity tests pass against the updated HQ.')], 'Accept', true)) return;
+          await post(`/${firmId()}/contract/accept`);
+          toast('Updated HQ procedures accepted');
+          recheck();
+        } catch (e) { toast(e.message, true); }
       } }, 'Accept updated HQ'))),
     marker, ...sections.flat(),
     log.length ? [el('div', { class: 'section-head' }, el('h2', {}, 'Repairs made')), el('div', { class: 'panel' }, el('table', { class: 'grid' },
@@ -128,15 +138,20 @@ export async function healthView(root) {
     el('div', { class: 'keyhelp' }, el('span', {}, '↑ ↓ move'), el('span', {}, 'Enter opens'), el('span', {}, 'R repairs or decides'), el('span', {}, 'C checks again')));
 
   const focus = () => rows[selected]?.tr.focus();
+  // This screen moves through its findings itself; the shell's generic list keys (app.js rowKeys) stay out, or Enter
+  // would open a row and toggle it shut again, and the first ↓ would skip a row.
+  root.dataset.ownKeys = '1';
   const keys = (e) => {
     if (!marker.isConnected) return document.removeEventListener('keydown', keys);
+    // Ctrl+C (copying an example) must not re-run every check, nor Ctrl+R open a repair instead of reloading.
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
     if (e.target.matches('input, textarea, select') || document.querySelector('#modal-root .modal')) return;
     const k = e.key.toLowerCase();
     if (e.key === 'ArrowDown') { e.preventDefault(); selected = Math.min(rows.length - 1, selected + 1); focus(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); selected = Math.max(0, selected - 1); focus(); }
     else if (e.key === 'Enter' && rows[selected]) { e.preventDefault(); rows[selected].toggle(); }
     else if (k === 'r' && rows[selected] && repairable(rows[selected].f)) { e.preventDefault(); repair(rows[selected].f); }
-    else if (k === 'c') { e.preventDefault(); healthView(root); }
+    else if (k === 'c') { e.preventDefault(); recheck(); }
   };
   document.addEventListener('keydown', keys);
 }

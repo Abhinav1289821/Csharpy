@@ -72,11 +72,13 @@ public sealed class VoucherService(FirmRegistry firms, FirmProfiles profiles, Wr
     public async Task<VoucherReceipt> PostAsync(string firmId, VoucherPost post, CancellationToken ct = default)
     {
         var firm = firms.Get(firmId);
-        var profile = await profiles.GetAsync(firm, ct);
         var receipt = await coordinator.RunAsync(new WriteRequest<VoucherReceipt>(
             firm, post.OperationId, "voucher.create." + post.Voucher.Kind, DocumentService.RequestHash(post), [],
             async session =>
             {
+                // Settings read inside the write transaction: a cached copy could be up to 30 s old, and the plan-hash check
+                // could not then notice a settings change (round-off type, charge accounts) made since the review.
+                var profile = await FirmProfiles.LoadAsync(firm, session);
                 var r = await ResolveAsync(session, profile, post.Voucher);
                 var plan = BuildCreate(r, auditRevision: 0);
                 Guard.Require(plan.Hash == post.ExpectedHash, "REVIEW_CHANGED", "Accounts or open bills changed since review. Review the voucher again.", FailureKind.Conflict);
@@ -149,11 +151,13 @@ public sealed class VoucherService(FirmRegistry firms, FirmProfiles profiles, Wr
     public async Task<VoucherReceipt> AmendAsync(string firmId, long documentId, VoucherAmendPost post, CancellationToken ct = default)
     {
         var firm = firms.Get(firmId);
-        var profile = await profiles.GetAsync(firm, ct);
         var receipt = await coordinator.RunAsync(new WriteRequest<VoucherReceipt>(
             firm, post.OperationId, "voucher.amend." + post.Voucher.Kind, DocumentService.RequestHash(new { documentId, post }), [documentId],
             async session =>
             {
+                // Settings read inside the write transaction: a cached copy could be up to 30 s old, and the plan-hash check
+                // could not then notice a settings change (round-off type, charge accounts) made since the review.
+                var profile = await FirmProfiles.LoadAsync(firm, session);
                 var (plan, state, r, _) = await PlanAmendAsync(session, firm, profile, documentId, post.Voucher);
                 Guard.Require(Hash(state.ContentHash, plan.Hash) == post.ExpectedHash, "REVIEW_CHANGED",
                     "The voucher, its bills or the accounts changed since you reviewed the correction. Review it again.", FailureKind.Conflict);
@@ -231,9 +235,13 @@ public sealed class VoucherService(FirmRegistry firms, FirmProfiles profiles, Wr
         var rows = await s.QueryAsync<(long Sr, long Act, long Contra, decimal Amount, string? Narration, int Ln)>(
             "SELECT CAST(SR_NO AS bigint), CAST(Act_ID AS bigint), CAST(ISNULL(Contra_ID,0) AS bigint), CAST(AMOUNT AS decimal(19,2)), Narration, CAST(ISNULL(lnno,0) AS int) FROM dbo.IQDayBook WHERE Doc_ID=@id AND ISNULL(VType,'')<>'D' ORDER BY SR_NO",
             new { id = state.DocumentId });
-        var banks = (await s.QueryAsync<(long Sr, int Type, string? No, int Date, string? Bank, string? Place, int Deposit)>(
+        var bankRows = await s.QueryAsync<(long Sr, int Type, string? No, int Date, string? Bank, string? Place, int Deposit)>(
             "SELECT CAST(Sr_no AS bigint), CAST(ISNULL(ChqType,2) AS int), chqno, CAST(ISNULL(chqdate,0) AS int), bname, BPlace, CAST(ISNULL(DepositDate,0) AS int) FROM dbo.IQbnktran WHERE Doc_ID=@id",
-            new { id = state.DocumentId })).ToDictionary(b => b.Sr);
+            new { id = state.DocumentId });
+        // IQbnktran is keyed by its own id only; two cheque rows on one ledger line cannot be shown as one line's details.
+        Guard.Supported(bankRows.GroupBy(b => b.Sr).All(g => g.Count() == 1), "HQ_VOUCHER_BANK_ROWS_UNSUPPORTED",
+            "This voucher has two bank-register rows for one line; correct it in HQ");
+        var banks = bankRows.ToDictionary(b => b.Sr);
         var linksBySource = state.Links.GroupBy(l => l.Source).ToDictionary(g => g.Key, g => g.Select(l => new AllocationRequest(l.Target, l.Amount)).ToList());
         static DateOnly? Day(int compact) => compact > 19000101 ? DateOnly.ParseExact(compact.ToString(CultureInfo.InvariantCulture), "yyyyMMdd", CultureInfo.InvariantCulture) : null;
         var lines = rows.Where(r => r.Ln >= 0).Select(r =>
@@ -278,8 +286,30 @@ public sealed class VoucherService(FirmRegistry firms, FirmProfiles profiles, Wr
     // ------------------------------------------------------------------ resolution
 
     /// <param name="amending">The voucher being corrected: its own settlements are released by the correction, so they count as open.</param>
+    /// <summary>Checks on the request alone, before HQ is read: cheque details HQ's IQbnktran can hold, and settlements in
+    /// whole paise. A longer cheque number was refused only at the final save (after review); 10.005 settled went into ADJUST
+    /// and BL_adjusted with a third decimal no HQ screen shows.</summary>
+    public static void RequireWellFormed(VoucherRequest r)
+    {
+        for (var i = 0; i < r.Lines.Count; i++)
+        {
+            var line = r.Lines[i];
+            if (line.Bank is { } b)
+            {
+                Guard.Require(b.Method is 0 or 2 or 4, "BANK_DETAILS", $"Line {i + 1}: choose cheque, transfer or other");
+                foreach (var (value, what) in new[] { (b.Reference, "cheque/reference number"), (b.Bank, "bank name"), (b.Place, "bank place") })
+                    Guard.Require((value ?? "").Length <= 50, "BANK_DETAILS", $"Line {i + 1}: the {what} can be at most 50 characters");
+            }
+            foreach (var a in line.Allocations ?? [])
+                Guard.Require(a.Amount > 0 && Money.Scale(a.Amount) <= 2, "INVALID_AMOUNT", $"Line {i + 1}: settle a positive amount in rupees and paise");
+        }
+        foreach (var a in r.HeaderAllocations ?? [])
+            Guard.Require(a.Amount > 0 && Money.Scale(a.Amount) <= 2, "INVALID_AMOUNT", "Settle a positive amount in rupees and paise");
+    }
+
     private static async Task<Resolved> ResolveAsync(HqSession s, FirmProfile profile, VoucherRequest r, long? amending = null)
     {
+        RequireWellFormed(r);
         profile.RequireWritableProfile();
         profile.Firm.RequireInPeriod(r.Date);
         var spec = VoucherSpec.For(r.Kind);
@@ -333,6 +363,8 @@ public sealed class VoucherService(FirmRegistry firms, FirmProfiles profiles, Wr
             Guard.Supported(profile.Config.BillWise == 1 && header.BillWise, "HQ_HEADER_ALLOCATION_UNSUPPORTED", "The header account is not bill-wise");
 
         // Validate allocation targets now (they are re-checked under row locks when posting).
+        var settling = r.Lines.SelectMany(l => l.Allocations ?? []).Concat(r.HeaderAllocations ?? [])
+            .GroupBy(a => a.EntryId).ToDictionary(g => g.Key, g => g.Sum(a => a.Amount));
         async Task Target(AllocationRequest a, VoucherLedgerRow row, string where)
         {
             var target = await s.QueryFirstOrDefaultAsync<(long Id, long AccountId, string Type, decimal Amount, decimal Allocated, long DocumentId, decimal Releasing)?>(
@@ -348,7 +380,10 @@ public sealed class VoucherService(FirmRegistry firms, FirmProfiles profiles, Wr
             Guard.Require(t.AccountId == row.AccountId && (t.Type is "D" or "P") != (row.Type is 'D' or 'P'), "HQ_ALLOCATION_ACCOUNT_MISMATCH",
                 $"{where}: the chosen bill belongs to another account or side");
             var open = t.Amount - t.Allocated + t.Releasing;
-            Guard.Require(a.Amount > 0 && a.Amount <= open, "HQ_ALLOCATION_EXCEEDS_OUTSTANDING", $"{where}: more than the bill's open amount ({Money.Text(open)})", FailureKind.Conflict);
+            // Two lines (or a line and the header) may settle the same bill; together they may not exceed it. Checked one
+            // by one, both passed review and the second then failed at saving as "settled elsewhere meanwhile".
+            Guard.Require(a.Amount > 0 && settling[a.EntryId] <= open, "HQ_ALLOCATION_EXCEEDS_OUTSTANDING",
+                $"{where}: more than the bill's open amount ({Money.Text(open)}{(settling[a.EntryId] != a.Amount ? ", counting the other lines settling it" : "")})", FailureKind.Conflict);
         }
         foreach (var (line, index) in r.Lines.Select((l, i) => (l, i)))
             foreach (var a in line.Allocations ?? [])
@@ -358,7 +393,8 @@ public sealed class VoucherService(FirmRegistry firms, FirmProfiles profiles, Wr
             var headerRow = ledger.FirstOrDefault(x => x.Line < 0)
                 ?? throw HqException.Unsupported("HQ_HEADER_ALLOCATION_UNSUPPORTED", "This voucher has no party row at the top to settle bills with");
             var headerAllocations = r.HeaderAllocations!;
-            Guard.Require(headerAllocations.Sum(a => a.Amount) <= total, "ALLOCATION_TOO_LARGE", "Allocated more than the voucher amount");
+            // Capped by the party row being settled, not the voucher total (which also counts cash-transfer lines).
+            Guard.Require(headerAllocations.Sum(a => a.Amount) <= headerRow.Amount, "ALLOCATION_TOO_LARGE", "Allocated more than the party's amount on this voucher");
             Guard.Require(headerAllocations.Select(a => a.EntryId).Distinct().Count() == headerAllocations.Count, "ALLOCATION_DUPLICATE", "A bill is allocated twice");
             foreach (var a in headerAllocations) await Target(a, headerRow, header.Name);
         }
@@ -459,6 +495,15 @@ public sealed class VoucherService(FirmRegistry firms, FirmProfiles profiles, Wr
         var state = await DocumentReader.StateAsync(s, documentId) ?? throw HqException.NotFound("HQ_DOCUMENT_NOT_FOUND", "The voucher is not in HQ");
         Guard.Supported(VoucherSpec.ForTt(state.TtId) is not null, "HQ_DOCUMENT_UNSUPPORTED", "This is not a receipt/payment/note voucher");
         firm.RequireInPeriod(DateOnly.FromDateTime((DateTime)state.Header["Doc_Date"]!));
+        // The same guards as a voucher correction and a bill delete: HQ settings MK has not verified (e.g. the change audit
+        // kept in a separate database, where the deleted-mark below would then be missing), and bank-reconciled or
+        // imported vouchers, which stay HQ-only.
+        (await FirmProfiles.LoadAsync(firm, s)).RequireWritableProfile();
+        var carried = await s.ScalarAsync<int>("""
+            SELECT (SELECT COUNT(*) FROM dbo.IQbnktran WHERE Doc_ID=@id AND (ISNULL(LTRIM(Status),'0') NOT IN ('0','') OR ISNULL(HRdate,0)<>0))
+                 + (SELECT COUNT(*) FROM dbo.IQDayBook WHERE Doc_ID=@id AND ISNULL(ImportCollection_DtldID,0)<>0)
+            """, new { id = documentId });
+        Guard.Supported(carried == 0, "HQ_VOUCHER_RECONCILED", "This voucher is bank-reconciled or was imported; delete it in HQ");
         var change = AllocationPlanner.Plan(state.Ledger, state.Related, [], state.Links, AllocationDisposition.Release);
         var id = new Args().Set("id", documentId);
         var steps = new List<PlanStep>

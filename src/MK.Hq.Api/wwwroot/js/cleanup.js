@@ -1,7 +1,7 @@
 // Guided item clean-up for the shop owner: one question at a time, answers saved as he goes, nothing in HQ until he
 // presses "Write to HQ".
 import { get, post } from './api.js';
-import { el, money, dmy, toast, confirmBox } from './util.js';
+import { el, money, dmy, toast, confirmBox, newest } from './util.js';
 import { firmId, loadCatalogue, state } from './state.js';
 
 const api = (p) => `/${firmId()}/cleanup${p}`;
@@ -16,13 +16,36 @@ const STEPS = {
 };
 
 // A key handler that retires with its screen (the router replaces <main> on every page; we check our own marker too).
-function onKeys(marker, handler) {
+// It retires only once its marker has been on the page: a key pressed while the card is still being built (the
+// look-alikes are fetched first) used to remove the new card's handler for good, leaving its one-key answers dead.
+// Register it after the marker is placed; the `seen` check is the safety net.
+export function onKeys(marker, handler, doc = document) {
+  let seen = false;
   const fn = (e) => {
-    if (!marker.isConnected) return document.removeEventListener('keydown', fn);
-    if (e.target.matches('input, textarea, select') && e.key !== 'Enter' && e.key !== 'Escape') return;
+    if (marker.isConnected) seen = true;
+    else { if (seen) doc.removeEventListener('keydown', fn); return; }
+    if (e.ctrlKey || e.altKey || doc.querySelector?.('.modal-back')) return;
+    if (e.target.matches?.('input, textarea, select') && e.key !== 'Enter' && e.key !== 'Escape') return;
     handler(e);
   };
-  document.addEventListener('keydown', fn);
+  doc.addEventListener('keydown', fn);
+  return fn;
+}
+
+/**
+ * One answer per card or question: the first key or click sends it, and every further key/click on the same card is
+ * ignored until it fails (then he may answer again). Without this a quick second Enter (or Enter then N) answered the
+ * item still on screen a second time, while the next one was loading.
+ */
+export function oneAnswer(onError = (e) => toast(e.message, true)) {
+  let busy = false;
+  const run = async (fn) => {
+    if (busy) return false;
+    busy = true;
+    try { await fn(); return true; } catch (e) { busy = false; onError(e); return false; }
+  };
+  run.busy = () => busy;
+  return run;
 }
 
 const reassure = () => el('p', { class: 'muted' }, 'Your answers are saved as you go. Nothing changes in HQ until the last step, "Write to HQ".');
@@ -53,7 +76,7 @@ export async function cleanupView(root, step) {
       try {
         await post(api('/import'), JSON.parse(await file.text()));
         toast('List loaded');
-        cleanupView(root);
+        await cleanupView(root);
       } catch (e) { toast(e.message, true); }
     });
     return [input, el('button', { class: s.items ? 'btn small' : 'btn primary', onclick: () => input.click() }, s.items ? 'Load a fresh list' : 'Load the list (proposals file)')];
@@ -98,7 +121,11 @@ async function automaticStep(root) {
     reassure(),
     el('div', { class: 'panel' }, el('table', { class: 'grid cu-table' }, el('tbody', {}, items.map((i) => {
       const keep = el('button', { class: 'btn small' }, i.decision?.keepName ? 'Kept as is' : 'Leave as is');
-      keep.addEventListener('click', async () => { await post(api('/decide'), [{ itemId: i.proposal.id, decision: { keepName: true } }]); keep.textContent = 'Kept as is'; keep.disabled = true; });
+      keep.addEventListener('click', async () => {
+        keep.disabled = true;
+        try { await post(api('/decide'), [{ itemId: i.proposal.id, decision: { keepName: true } }]); keep.textContent = 'Kept as is'; }
+        catch (e) { keep.disabled = false; toast(e.message, true); }
+      });
       const same = i.proposal.proposed === i.proposal.current;
       return el('tr', {}, el('td', { class: 'muted' }, i.proposal.current), el('td', {}, '→'),
         el('td', { class: 'cu-new' }, same ? el('span', { class: 'muted' }, 'extra space before or after the name removed') : i.proposal.proposed),
@@ -110,19 +137,29 @@ async function automaticStep(root) {
 
 async function rulesStep(root) {
   const s = await get(api(''));
+  if (!root.isConnected) return; // he left while it loaded: no keys for a question nobody sees
   const open = s.rules.filter((r) => !r.decision);
   const rule = open[0];
   if (!rule) {
     root.replaceChildren(el('div', { class: 'row spread' }, el('h1', {}, STEPS.rules.title), back()), el('p', {}, 'All formatting rules are answered.'),
       el('div', { class: 'panel stack' }, s.rules.map((r) => el('div', { class: 'row spread' }, el('div', {}, el('strong', {}, r.title), el('span', { class: 'muted' }, ` · ${n(r.items)} items`)),
-        el('div', { class: 'row' }, el('span', {}, r.decision === 'yes' ? '✓ Yes' : '✗ No'), el('button', { class: 'btn small', onclick: async () => { await post(api('/rules'), { rule: r.rule, decision: null }); rulesStep(root); } }, 'Change'))))));
+        el('div', { class: 'row' }, el('span', {}, r.decision === 'yes' ? '✓ Yes' : '✗ No'), el('button', { class: 'btn small', onclick: async () => {
+          try { await post(api('/rules'), { rule: r.rule, decision: null }); await rulesStep(root); } catch (e) { toast(e.message, true); }
+        } }, 'Change'))))));
     return;
   }
-  const answer = async (decision) => { await post(api('/rules'), { rule: rule.rule, decision }); rulesStep(root); };
+  // One answer per question: Enter then N (or Enter twice) while the next question loads must not answer this rule twice.
+  const once = oneAnswer();
+  const answer = (decision) => once(async () => {
+    await post(api('/rules'), { rule: rule.rule, decision });
+    // The answer is saved; a failure to load the next question is shown, but must not re-open this one.
+    rulesStep(root).catch((e) => toast(e.message, true));
+  });
   const marker = el('span');
   const all = el('div');
   const showAll = async () => {
-    const items = await get(api(`/items?stage=rule:${encodeURIComponent(rule.rule)}&take=3000`));
+    let items;
+    try { items = await get(api(`/items?stage=rule:${encodeURIComponent(rule.rule)}&take=3000`)); } catch (e) { toast(e.message, true); return; }
     all.replaceChildren(el('div', { class: 'panel scroll', style: { maxHeight: '50vh' } }, el('table', { class: 'grid cu-table' }, el('tbody', {}, items.map((i) =>
       el('tr', {}, el('td', { class: 'muted' }, i.proposal.current), el('td', {}, '→'), el('td', { class: 'cu-new' }, i.proposal.proposed)))))));
   };
@@ -150,7 +187,9 @@ async function cardFlow(root, { stage, heading, answered, render }) {
   let skipped = new Set();
   const total = items.length;
   const next = () => items.find((i) => !answered(i) && !skipped.has(i.proposal.id));
+  const ticket = newest(); // only the newest card may land (a slow look-alike fetch must not replace a later card)
   const show = async () => {
+    const current = ticket();
     const item = next();
     const done = items.filter(answered).length;
     if (!item) {
@@ -161,18 +200,30 @@ async function cardFlow(root, { stage, heading, answered, render }) {
       return;
     }
     const marker = el('span');
-    const save = async (decision) => {
-      try {
-        await post(api('/decide'), [{ itemId: item.proposal.id, decision }]);
-        item.decision = { ...(item.decision ?? {}), ...decision };
-        show();
-      } catch (e) { toast(e.message, true); }
-    };
-    const skip = () => { skipped.add(item.proposal.id); show(); };
-    const body = await render(item, save, skip, marker);
+    // This card answers once: until the next card is on screen, further keys and clicks on it do nothing.
+    const once = oneAnswer();
+    // `others`: decisions on other items sent in the same call (the look-alikes retired with "keep this one").
+    const save = (decision, others = []) => once(async () => {
+      await post(api('/decide'), [...others, { itemId: item.proposal.id, decision }]);
+      item.decision = { ...(item.decision ?? {}), ...decision };
+      show();
+    });
+    const skip = () => once(async () => { skipped.add(item.proposal.id); show(); });
+    let built;
+    try {
+      built = await render(item, save, skip);
+    } catch (e) {
+      if (!current() || !root.isConnected) return;
+      root.replaceChildren(el('div', { class: 'row spread' }, el('h1', {}, heading), back()),
+        el('div', { class: 'issue err' }, e.message), el('div', { class: 'row cu-buttons' }, el('button', { class: 'btn primary', onclick: () => show() }, 'Try again')));
+      return;
+    }
+    if (!current() || !root.isConnected) return;
     root.replaceChildren(el('div', { class: 'row spread' }, el('h1', {}, heading), back()),
       el('div', { class: 'cu-progress' }, el('div', { style: { width: `${Math.round(100 * done / Math.max(1, total))}%` } })),
-      el('p', { class: 'muted' }, `${done} of ${total} done · Enter = yes · S = skip for now`), marker, body);
+      el('p', { class: 'muted' }, `${done} of ${total} done · Enter = yes · S = skip for now`), marker, built.body);
+    // Keys only once this card is on the page (the previous card's handler retires as its marker leaves).
+    onKeys(marker, built.keys);
     // No automatic focus in the text box: the one-key answers (K, R, S, D…) must work straight away; he clicks into the box
     // only to type his own wording, and Enter then saves it.
     document.activeElement?.blur?.();
@@ -193,27 +244,27 @@ async function reviewStep(root) {
   await cardFlow(root, {
     stage: 'review', heading: STEPS.review.title,
     answered: (i) => !!(i.decision && (i.decision.name || i.decision.keepName)),
-    render: async (item, save, skip, marker) => {
+    render: async (item, save, skip) => {
       const p = item.proposal;
       const name = el('input', { class: 'cu-name cu-focus', value: item.decision?.name ?? p.proposed, maxlength: 70 });
       const twins = p.duplicateOf?.length ? await get(api(`/items?stage=review&ids=${p.duplicateOf.join(',')}`)) : [];
       const use = () => save({ name: name.value.trim() || p.proposed });
-      // The usual answer for a duplicate: keep this one, retire the look-alikes that hold no stock.
+      // The usual answer for a duplicate: keep this one, retire the look-alikes that hold no stock. One call, so the
+      // look-alikes are never retired while this item's own answer fails to save.
       const spare = twins.filter((t) => Number(t.proposal.stock) <= 0 && t.proposal.active && t.status !== 'applied');
-      const keepThis = async () => {
+      const keepThis = () => {
         if (!spare.length) return;
-        await post(api('/decide'), spare.map((t) => ({ itemId: t.proposal.id, decision: { keepName: true, retire: true } })));
-        await use();
+        save({ name: name.value.trim() || p.proposed }, spare.map((t) => ({ itemId: t.proposal.id, decision: { keepName: true, retire: true } })));
       };
-      onKeys(marker, (e) => {
+      const keys = (e) => {
         const k = e.key.toLowerCase();
         if (e.key === 'Enter') { e.preventDefault(); use(); }
         else if (k === 'd' && spare.length) { e.preventDefault(); keepThis(); }
         else if (k === 'k') { e.preventDefault(); save({ keepName: true }); }
         else if (k === 'r') { e.preventDefault(); save({ keepName: true, retire: true }); }
         else if (k === 's') { e.preventDefault(); skip(); }
-      });
-      return el('div', { class: 'panel stack cu-card' },
+      };
+      return { keys, body: el('div', { class: 'panel stack cu-card' },
         el('div', { class: 'muted' }, 'Now called'), el('div', { class: 'cu-old' }, p.current),
         el('div', { class: 'muted' }, 'New name (you can change it)'), name,
         ...p.notes.map((x) => el('div', { class: 'issue warn' }, plain(x))),
@@ -226,7 +277,7 @@ async function reviewStep(root) {
           spare.length ? el('button', { class: 'btn big', onclick: keepThis }, `Keep this, retire ${spare.length === twins.length ? 'the look-alike' + (spare.length > 1 ? 's' : '') : spare.length + ' without stock'}  (D)`) : null,
           el('button', { class: 'btn big', onclick: () => save({ keepName: true }) }, 'Keep the old name  (K)'),
           el('button', { class: 'btn', onclick: () => save({ keepName: true, retire: true }) }, 'Retire this item  (R)'),
-          el('button', { class: 'btn', onclick: skip }, 'Skip for now  (S)')));
+          el('button', { class: 'btn', onclick: skip }, 'Skip for now  (S)'))) };
     },
   });
 }
@@ -236,7 +287,7 @@ async function dataStep(root) {
   await cardFlow(root, {
     stage: 'data', heading: STEPS.data.title,
     answered: (i) => !!(i.decision && (i.decision.hsn || i.decision.gst != null || i.decision.dataLeave)),
-    render: async (item, save, skip, marker) => {
+    render: async (item, save, skip) => {
       const p = item.proposal;
       const hsn = el('input', { class: 'cu-name cu-focus', value: item.decision?.hsn ?? p.hsnSuggest ?? p.hsn ?? '', inputmode: 'numeric', maxlength: 8, style: { maxWidth: '220px' } });
       const gst = el('select', { class: 'cu-select' }, rates.map((r) => el('option', { value: r, selected: Number(r) === Number(item.decision?.gst ?? p.gst) }, `${r}%`)));
@@ -246,13 +297,13 @@ async function dataStep(root) {
         if (Number(gst.value) !== Number(p.gst)) d.gst = Number(gst.value);
         save(Object.keys(d).length ? d : { dataLeave: true });
       };
-      onKeys(marker, (e) => {
+      const keys = (e) => {
         const k = e.key.toLowerCase();
         if (e.key === 'Enter') { e.preventDefault(); fix(); }
         else if (k === 'l') { e.preventDefault(); save({ dataLeave: true }); }
         else if (k === 's') { e.preventDefault(); skip(); }
-      });
-      return el('div', { class: 'panel stack cu-card' },
+      };
+      return { keys, body: el('div', { class: 'panel stack cu-card' },
         el('div', { class: 'cu-new' }, p.proposed ?? p.current),
         el('div', { class: 'issue warn' }, p.dataCheck),
         facts(p),
@@ -261,7 +312,7 @@ async function dataStep(root) {
         el('div', { class: 'row cu-buttons' },
           el('button', { class: 'btn primary big', onclick: fix }, 'Save this  (Enter)'),
           el('button', { class: 'btn big', onclick: () => save({ dataLeave: true }) }, 'Leave it as it is  (L)'),
-          el('button', { class: 'btn', onclick: skip }, 'Skip for now  (S)')));
+          el('button', { class: 'btn', onclick: skip }, 'Skip for now  (S)'))) };
     },
   });
 }
@@ -272,24 +323,24 @@ async function groupsStep(root) {
   await cardFlow(root, {
     stage: 'groups', heading: STEPS.groups.title,
     answered: (i) => !!(i.decision && (i.decision.groupId || i.decision.groupLeave)),
-    render: async (item, save, skip, marker) => {
+    render: async (item, save, skip) => {
       const p = item.proposal;
       const target = byName[(p.suggestGroup ?? '').toUpperCase()];
       const move = () => target ? save({ groupId: target }) : toast('That group is not in HQ', true);
-      onKeys(marker, (e) => {
+      const keys = (e) => {
         const k = e.key.toLowerCase();
         if (e.key === 'Enter') { e.preventDefault(); move(); }
         else if (k === 'n') { e.preventDefault(); save({ groupLeave: true }); }
         else if (k === 's') { e.preventDefault(); skip(); }
-      });
-      return el('div', { class: 'panel stack cu-card' },
+      };
+      return { keys, body: el('div', { class: 'panel stack cu-card' },
         el('div', { class: 'cu-new' }, p.proposed ?? p.current),
         el('div', { class: 'cu-question' }, `It is in "${p.group}". Items like it are in "${p.suggestGroup}". Move it?`),
         facts(p),
         el('div', { class: 'row cu-buttons' },
           el('button', { class: 'btn primary big', onclick: move }, `Move to ${p.suggestGroup}  (Enter)`),
           el('button', { class: 'btn big', onclick: () => save({ groupLeave: true }) }, 'Leave it  (N)'),
-          el('button', { class: 'btn', onclick: skip }, 'Skip for now  (S)')));
+          el('button', { class: 'btn', onclick: skip }, 'Skip for now  (S)'))) };
     },
   });
 }
@@ -352,9 +403,14 @@ async function applyStep(root) {
     const notes = el('div', { class: 'stack' });
     out.replaceChildren(el('div', { class: 'cu-progress big' }, bar), line, notes);
     let first = null;
+    // The whole run belongs to the firm it started in: a firm switch midway must not send the next batch to the other
+    // firm's HQ (unconfirmed), and leaving the page stops it.
+    const url = api(path);
+    const startedIn = firmId();
     for (;;) {
+      if (firmId() !== startedIn || !out.isConnected) { toast('Writing stopped: you left the clean-up page. Open it again to continue.', true); return; }
       let r;
-      try { r = await post(api(path), { ...body, batchId, take: 20 }); }
+      try { r = await post(url, { ...body, batchId, take: 20 }); }
       catch (e) { line.textContent = e.message; toast(e.message, true); return; }
       batchId = r.batchId;
       first ??= r.remaining + r.applied + r.skipped + r.failed;

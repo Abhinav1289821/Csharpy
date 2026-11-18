@@ -45,7 +45,8 @@ var app = builder.Build();
 var token = ApiToken.LoadOrCreate(hq.DataDirectory);
 app.Services.GetRequiredService<MK.Hq.Api.Agent.AgentHub>().ToolsBaseUrl =
     app.Services.GetRequiredService<MK.Hq.Api.Agent.AgentOptions>().ToolsBaseUrl ?? mainUrls.Split(';')[0];
-app.Logger.LogInformation("MK HQ Billing: open {Url}/#token={Token}", mainUrls.Split(';')[0], token);
+// The access key stays out of the log (logs get copied around); the launcher reads it from var\api.token.
+app.Logger.LogInformation("MK HQ Billing on {Url} (access key in {File})", mainUrls.Split(';')[0], Path.Combine(hq.DataDirectory, "api.token"));
 if (pairing.Enabled) app.Logger.LogInformation("Phone uploads on http://{Lan}:{Port}/m/… (QR codes only)", pairing.LanAddress, pairing.Port);
 
 // ---- startup: settle any interrupted save, pin/verify HQ's procedure contract ----
@@ -92,17 +93,29 @@ app.Use(async (ctx, next) =>
         ctx.Response.StatusCode = 400;
         await ctx.Response.WriteAsJsonAsync(new { code = "BAD_JSON", message = "The request could not be read: " + e.Message, kind = "Invalid" });
     }
+    catch (FormatException e)
+    {
+        ctx.Response.StatusCode = 400;
+        await ctx.Response.WriteAsJsonAsync(new { code = "BAD_REQUEST", message = "A value in the request is not a valid number or date: " + e.Message, kind = "Invalid" });
+    }
+    catch (Exception e) when (e is not OperationCanceledException && !ctx.Response.HasStarted)
+    {
+        // Anything else is an engine bug: log it with its stack, answer in the same {code, message} shape the client expects.
+        app.Logger.LogError(e, "Unhandled error on {Method} {Path}", ctx.Request.Method, ctx.Request.Path);
+        ctx.Response.StatusCode = 500;
+        await ctx.Response.WriteAsJsonAsync(new { code = "INTERNAL", message = "Something went wrong in MK Billing. Details are in the log.", kind = "Internal" });
+    }
 });
 
 // ---- bearer token for every /api route except health ----
 app.Use(async (ctx, next) =>
 {
+    // Only the health probe itself is open. StartsWithSegments("/api/health") also opened every /api/{firm}/... route
+    // with firm "health": /api/health/drafts/{id} (PUT/DELETE), /api/health/cleanup/..., all without the key.
     var path = ctx.Request.Path;
-    if (path.StartsWithSegments("/api") && !path.StartsWithSegments("/api/health"))
+    if (path.StartsWithSegments("/api") && !ApiAuth.IsOpen(path))
     {
-        var header = ctx.Request.Headers.Authorization.ToString();
-        var supplied = header.StartsWith("Bearer ", StringComparison.Ordinal) ? header[7..] : ctx.Request.Query["token"].ToString();
-        if (!CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(supplied), System.Text.Encoding.UTF8.GetBytes(token)))
+        if (!ApiAuth.Accepts(ctx.Request.Headers.Authorization.ToString(), ctx.Request.Query["token"].ToString(), token))
         {
             ctx.Response.StatusCode = 401;
             await ctx.Response.WriteAsJsonAsync(new { code = "UNAUTHORIZED", message = "Open MK Billing from its launcher (the link carries the access key).", kind = "Invalid" });
@@ -157,7 +170,7 @@ firm.MapGet("/documents", async (string firm, string? tt, DateOnly? from, DateOn
     await using var s = await firms.Get(firm).OpenAsync(ct);
     return await DocumentReader.ListAsync(s, new DocumentFilter
     {
-        TtIds = string.IsNullOrWhiteSpace(tt) ? null : tt.Split(',').Select(int.Parse).ToList(),
+        TtIds = string.IsNullOrWhiteSpace(tt) ? null : ApiAuth.Ids<int>(tt, "tt"),
         From = from, To = to, AccountId = account, Search = q, BeforeId = before, Take = take ?? 100,
     });
 });
@@ -197,7 +210,7 @@ firm.MapPost("/masters/accounts", (string firm, AccountPost body, AccountMasterS
 firm.MapPost("/cleanup/import", (string firm, CleanupFile body, ItemCleanupService s, CancellationToken ct) => s.ImportAsync(firm, body, ct));
 firm.MapGet("/cleanup", (string firm, ItemCleanupService s) => s.Summary(firm));
 firm.MapGet("/cleanup/items", (string firm, string stage, string? ids, int? take, ItemCleanupService s) =>
-    s.List(firm, stage, string.IsNullOrWhiteSpace(ids) ? null : ids.Split(',').Select(long.Parse).ToList(), take ?? 200));
+    s.List(firm, stage, string.IsNullOrWhiteSpace(ids) ? null : ApiAuth.Ids<long>(ids, "ids"), take ?? 200));
 firm.MapPost("/cleanup/decide", (string firm, CleanupAnswer[] body, ItemCleanupService s) => s.Decide(firm, body.Select(a => (a.ItemId, a.Decision)).ToList()));
 firm.MapPost("/cleanup/rules", (string firm, CleanupRuleAnswer body, ItemCleanupService s) => s.DecideRule(firm, body.Rule, body.Decision));
 firm.MapPost("/cleanup/apply", (string firm, CleanupRun body, ItemCleanupService s, CancellationToken ct) => s.ApplyAsync(firm, body.BatchId, body.Take ?? 20, ct));

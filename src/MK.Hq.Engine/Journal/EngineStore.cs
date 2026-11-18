@@ -108,6 +108,21 @@ public sealed class EngineStore
             """, new { id, status = status.ToString(), documentId, evidence, result, errorCode, errorMessage, now = Now() });
     }
 
+    /// <summary>
+    /// Back to Pending with no evidence, receipt or document: for an operation that is about to be attempted again after
+    /// it was proven NOT committed. <see cref="Update"/> keeps old evidence (COALESCE), and stale evidence is dangerous: an
+    /// amend's "ModifyCnt = n+1" or a voucher's "ledger rows newer than X" becomes true as soon as someone saves that
+    /// document in HQ, and recovery would then mark this never-written operation Committed with a receipt for it.
+    /// </summary>
+    public void Restart(string id)
+    {
+        using var cn = Open();
+        cn.Execute("""
+            UPDATE operations SET status='Pending', document_id=NULL, evidence=NULL, result=NULL, error_code=NULL, error_message=NULL,
+              updated_at=@now WHERE id=@id
+            """, new { id, now = Now() });
+    }
+
     private static OperationRecord Map(dynamic r) => new(
         (string)r.Id, (string)r.Firm, (string)r.Kind, (string)r.RequestHash, Enum.Parse<OperationStatus>((string)r.Status),
         (long?)r.DocumentId, (string?)r.Evidence, (string?)r.Result, (string?)r.ErrorCode, (string?)r.ErrorMessage, (string)r.CreatedAt, (string)r.UpdatedAt);

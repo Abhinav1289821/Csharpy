@@ -167,6 +167,7 @@ public sealed class DocumentReader
               AND (@account IS NULL OR h.HeadAct_ID=@account OR h.Act_ID=@account)
               AND (@search IS NULL OR c.Act_Name LIKE @search OR a.Act_Name LIKE @search OR RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12)) LIKE @search OR h.Supp_Billno LIKE @search)
               AND (@before IS NULL OR h.Doc_Id < @before)
+              AND (@only IS NULL OR h.Doc_Id = @only)
             ORDER BY h.Doc_Date DESC, h.Doc_Id DESC
             """, new
         {
@@ -177,22 +178,29 @@ public sealed class DocumentReader
             account = f.AccountId,
             search = string.IsNullOrWhiteSpace(f.Search) ? null : "%" + f.Search.Trim().Replace("[", "[[]").Replace("%", "[%]") + "%",
             before = f.BeforeId,
+            only = f.DocumentId,
         });
 
     public static async Task<DocumentView?> ViewAsync(HqSession s, FirmProfile profile, long documentId)
     {
         var state = await StateAsync(s, documentId);
         if (state is null) return null;
-        var summary = (await ListAsync(s, new DocumentFilter { Take = 500, BeforeId = documentId + 1, From = null, TtIds = [state.TtId] }))
-            .First(x => x.DocumentId == documentId);
+        // By id, not by scanning the latest 500 bills by date: a back-dated bill fell outside that window and failed to open.
+        var summary = (await ListAsync(s, new DocumentFilter { Take = 1, DocumentId = documentId })).Single();
         var h = state.Header;
         var basis = Convert.ToInt32(h["Exclusive"] ?? 0, CultureInfo.InvariantCulture) == 1 ? TaxBasis.Inclusive : TaxBasis.Exclusive;
         var interstate = Convert.ToInt32(h["GST_Type"] ?? 1, CultureInfo.InvariantCulture) == 0;
-        var items = (await s.QueryAsync<(long Id, string Code, string Name, string Unit)>("""
-            SELECT CAST(im.Item_ID AS bigint), LTRIM(RTRIM(ISNULL(im.Item_Code,''))), LTRIM(RTRIM(im.Item_Name)),
+        // Looked up by item and unit: an item with two unit rows (HQ allows it) has two rows here, and opening any bill with
+        // it must not fail. IQItems_Units has no unique key, so a repeated row just shows the first (the item's own unit row
+        // before any batch row); a line whose unit row has gone still shows the item's name.
+        var unitRows = await s.QueryAsync<(long Id, long UnitId, string Code, string Name, string Unit)>("""
+            SELECT CAST(im.Item_ID AS bigint), CAST(iu.UNit_Id AS bigint), LTRIM(RTRIM(ISNULL(im.Item_Code,''))), LTRIM(RTRIM(im.Item_Name)),
               LTRIM(RTRIM(COALESCE(NULLIF(LTRIM(RTRIM(iu.ReportPack)),''), im.Item_Pack, '')))
             FROM dbo.IQItems_Mast im JOIN dbo.IQItems_Units iu ON iu.Item_ID=im.Item_ID WHERE im.Item_ID IN @ids
-            """, new { ids = state.ItemIds.DefaultIfEmpty(0).ToArray() })).ToDictionary(x => x.Id);
+            ORDER BY CASE WHEN ISNULL(iu.Recd_ID,0)=0 THEN 0 ELSE 1 END, iu.ItemUnitsDtldID
+            """, new { ids = state.ItemIds.DefaultIfEmpty(0).ToArray() });
+        var byUnit = unitRows.GroupBy(x => (x.Id, x.UnitId)).ToDictionary(g => g.Key, g => g.First());
+        var byItem = unitRows.GroupBy(x => x.Id).ToDictionary(g => g.Key, g => g.First());
         var supplied = new Dictionary<long, decimal>();
         if (state.Kind == DocumentKind.SalesOrder && state.Lines.Count > 0)
             foreach (var (id, qty) in await s.QueryAsync<(long, decimal)>(
@@ -204,14 +212,15 @@ public sealed class DocumentReader
         var lines = state.Lines.Select((l, i) =>
         {
             var itemId = Convert.ToInt64(l["Item_ID"], CultureInfo.InvariantCulture);
-            var it = items.GetValueOrDefault(itemId);
+            var unitId = Convert.ToInt64(l["UnitID"], CultureInfo.InvariantCulture);
+            var it = byUnit.TryGetValue((itemId, unitId), out var exact) ? exact : byItem.GetValueOrDefault(itemId);
             var taxRate = D(l, "Tax");
             var cgst = interstate ? 0 : D(l, "CGST_TaxAmt");
             var sgst = interstate ? 0 : D(l, "SGST_TaxAmt");
             var igst = interstate ? D(l, "TaxValue") : 0;
             var lineId = Convert.ToInt64(l[state.LineKey], CultureInfo.InvariantCulture);
             var orderLink = l.TryGetValue("OrdDelv_Id", out var o) && o is not null && Convert.ToInt64(o, CultureInfo.InvariantCulture) > 0 ? Convert.ToInt64(o, CultureInfo.InvariantCulture) : (long?)null;
-            return new DocumentLineView(lineId, i + 1, itemId, Convert.ToInt64(l["UnitID"], CultureInfo.InvariantCulture), it.Code ?? "", it.Name ?? "#" + itemId, it.Unit ?? "",
+            return new DocumentLineView(lineId, i + 1, itemId, unitId, it.Code ?? "", it.Name ?? "#" + itemId, it.Unit ?? "",
                 DocumentResolver.Text(l, "HSNCODE"), DocumentResolver.Text(l, "ItemDesc"), D(l, "Qty"), D(l, "Rate"), D(l, "Disc"), D(l, "DiscValue"), D(l, "Value"),
                 D(l, "GrossValue"), taxRate, cgst, sgst, igst, D(l, "NetValue"), orderLink, supplied.TryGetValue(lineId, out var sq) ? sq : null);
         }).ToList();
@@ -260,5 +269,7 @@ public sealed record DocumentFilter
     public long? AccountId { get; init; }
     public string? Search { get; init; }
     public long? BeforeId { get; init; }
+    /// <summary>Exactly this document (used when opening one bill).</summary>
+    public long? DocumentId { get; init; }
     public int Take { get; init; } = 100;
 }

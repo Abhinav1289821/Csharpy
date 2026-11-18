@@ -51,7 +51,8 @@ public sealed class HqSession : IAsyncDisposable
     public async Task BeginAsync(IsolationLevel isolation = IsolationLevel.Serializable)
     {
         Guard.Invariant(Transaction is null, "A transaction is already open");
-        Transaction = (SqlTransaction)await Connection.BeginTransactionAsync(isolation);
+        try { Transaction = (SqlTransaction)await Connection.BeginTransactionAsync(isolation); }
+        catch (SqlException e) { throw Translate(e); }
     }
 
     static HqSession() => DapperSetup.Ensure();
@@ -111,7 +112,11 @@ public sealed class HqSession : IAsyncDisposable
     public async Task AssertIntactAsync()
     {
         if (Transaction is null) return;
-        var (count, state) = await Connection.QuerySingleAsync<(int, int)>("SELECT @@TRANCOUNT, XACT_STATE()", transaction: Transaction);
+        // Translated like every other read: a raw SqlException here (deadlock, dropped connection) bypassed the retry and
+        // journal handling, which only understand HqException.
+        int count, state;
+        try { (count, state) = await Connection.QuerySingleAsync<(int, int)>("SELECT @@TRANCOUNT, XACT_STATE()", transaction: Transaction); }
+        catch (SqlException e) { throw Translate(e); }
         Guard.Require(count == 1 && state == 1, "HQ_TRANSACTION_LOST", "An HQ procedure ended the transaction; nothing was saved", FailureKind.Unavailable);
     }
 
@@ -126,7 +131,8 @@ public sealed class HqSession : IAsyncDisposable
         p.Add("@LockOwner", "Transaction");
         p.Add("@LockTimeout", timeoutMs);
         p.Add("@result", dbType: DbType.Int32, direction: ParameterDirection.ReturnValue);
-        await Connection.ExecuteAsync("sp_getapplock", p, Transaction, commandType: CommandType.StoredProcedure);
+        try { await Connection.ExecuteAsync("sp_getapplock", p, Transaction, commandType: CommandType.StoredProcedure); }
+        catch (SqlException e) { throw Translate(e); }
         var result = p.Get<int>("@result");
         Guard.Require(result >= 0, "OPERATION_BUSY", "Another MK terminal is saving the same thing; try again in a moment", FailureKind.Conflict);
     }
@@ -228,7 +234,7 @@ public sealed class HqSession : IAsyncDisposable
                 };
                 if (p.CharacterLimit is > 0 and var limit && text.Length > limit)
                     throw HqException.Invalid("HQ_FIELD_TOO_LONG", $"A value for {p.Name.TrimStart('@')} is longer than HQ can store ({limit} characters)", new { procedure, parameter = p.Name });
-                if (p.DbType is SqlDbType.VarChar or SqlDbType.Char && text.Any(c => c > 0xFF))
+                if (p.DbType is SqlDbType.VarChar or SqlDbType.Char && text.Any(c => !StoresInHqVarchar(c)))
                     throw HqException.Invalid("HQ_FIELD_ENCODING", $"{p.Name.TrimStart('@')} contains characters HQ cannot store (use English letters)");
                 return text;
             case SqlDbType.DateTime or SqlDbType.SmallDateTime or SqlDbType.Date:
@@ -244,10 +250,24 @@ public sealed class HqSession : IAsyncDisposable
             case SqlDbType.Float or SqlDbType.Real:
                 return System.Convert.ToDouble(value, CultureInfo.InvariantCulture);
             case SqlDbType.Decimal or SqlDbType.Money or SqlDbType.SmallMoney:
-                return value is string ds ? decimal.Parse(ds, CultureInfo.InvariantCulture) : System.Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+                var amount = value is string ds ? decimal.Parse(ds, CultureInfo.InvariantCulture) : System.Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+                // SqlClient refuses a value with more whole digits than numeric(p,s) holds with a bare ArgumentException
+                // ("Parameter value is out of range") that no error handler understands. Say which field, in shop terms.
+                if (p.DbType == SqlDbType.Decimal && p.Precision > 0 && p.Precision - p.Scale < 29 && Math.Abs(decimal.Truncate(amount)) >= Pow10(p.Precision - p.Scale))
+                    throw OutOfRange(procedure, p, amount);
+                return amount;
             case SqlDbType.Int or SqlDbType.BigInt or SqlDbType.SmallInt or SqlDbType.TinyInt:
                 var number = value is string ns ? decimal.Parse(ns, CultureInfo.InvariantCulture) : System.Convert.ToDecimal(value, CultureInfo.InvariantCulture);
                 Guard.Invariant(number == decimal.Truncate(number), $"{p.Name} expects a whole number");
+                // The casts below throw a bare OverflowException for 40000 into a smallint or -1 into a tinyint.
+                var (min, max) = p.DbType switch
+                {
+                    SqlDbType.BigInt => (long.MinValue, long.MaxValue),
+                    SqlDbType.SmallInt => (short.MinValue, short.MaxValue),
+                    SqlDbType.TinyInt => (byte.MinValue, byte.MaxValue),
+                    _ => ((long)int.MinValue, (long)int.MaxValue),
+                };
+                if (number < min || number > max) throw OutOfRange(procedure, p, number);
                 return p.DbType switch
                 {
                     SqlDbType.BigInt => (object)(long)number,
@@ -260,17 +280,42 @@ public sealed class HqSession : IAsyncDisposable
         }
     }
 
+    private static HqException OutOfRange(string procedure, ProcedureParameter p, decimal value) =>
+        HqException.Invalid("HQ_FIELD_OUT_OF_RANGE", $"{value.ToString(CultureInfo.InvariantCulture)} is too large for {p.Name.TrimStart('@')} in HQ",
+            new { procedure, parameter = p.Name });
+
+    private static decimal Pow10(int digits)
+    {
+        var r = 1m;
+        for (var i = 0; i < digits; i++) r *= 10;
+        return r;
+    }
+
+    /// <summary>
+    /// HQ's varchar columns use code page 1252 (SQL_Latin1_General_CP1). U+0080–U+009F are C1 control codes there and SQL
+    /// Server silently stores most of them as '?', so they are refused like anything above U+00FF. The five it keeps as the
+    /// same byte (0x81, 0x8D, 0x8F, 0x90, 0x9D) round-trip, so text read back from HQ with them can be saved again.
+    /// </summary>
+    private static bool StoresInHqVarchar(char c) =>
+        c < 0x80 || (c >= 0xA0 && c <= 0xFF) || c is '\u0081' or '\u008D' or '\u008F' or '\u0090' or '\u009D';
+
     /// <summary>Turns SQL Server errors into business errors. Guard statements raise "MK:CODE|message".</summary>
     public static HqException Translate(SqlException e, string? procedure = null)
     {
         var where = procedure is null ? "" : $" ({procedure})";
-        if (e.Message.StartsWith("MK:", StringComparison.Ordinal))
+        // The guard's own error, not e.Message: SqlException.Message joins every error and warning of the batch, so a guard
+        // after an aggregate showed "...\r\nWarning: Null value is eliminated by an aggregate..." to the operator.
+        var guard = e.Errors.Cast<SqlError>().Select(x => x.Message).FirstOrDefault(m => m.StartsWith("MK:", StringComparison.Ordinal))
+                    ?? (e.Message.StartsWith("MK:", StringComparison.Ordinal) ? e.Message : null);
+        if (guard is not null)
         {
-            var body = e.Message[3..];
+            var body = guard[3..];
             var bar = body.IndexOf('|');
             var code = bar < 0 ? body : body[..bar];
             var message = bar < 0 ? body : body[(bar + 1)..];
-            return new HqException(code, message, code.EndsWith("CHANGED") || code.EndsWith("TAKEN") || code.Contains("ALLOCATION") ? FailureKind.Conflict : FailureKind.Invalid, inner: e);
+            var conflict = code.EndsWith("CHANGED", StringComparison.Ordinal) || code.EndsWith("TAKEN", StringComparison.Ordinal)
+                           || code.Contains("ALLOCATION", StringComparison.Ordinal);
+            return new HqException(code, message, conflict ? FailureKind.Conflict : FailureKind.Invalid, inner: e);
         }
         return e.Number switch
         {

@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using MK.Hq.Domain;
 using MK.Hq.Domain.Gst;
 using MK.Hq.Engine.Hq;
 
@@ -20,6 +21,29 @@ public static class ApiToken
         File.WriteAllText(path, token);
         return token;
     }
+}
+
+/// <summary>Which /api requests need the access key, and whether a request carries it.</summary>
+public static class ApiAuth
+{
+    /// <summary>Only the health probe itself ("/api/health", any case, optional trailing slash) is open; nothing under it.</summary>
+    public static bool IsOpen(PathString path) =>
+        path.Equals("/api/health", StringComparison.OrdinalIgnoreCase) || path.Equals("/api/health/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The key from "Authorization: Bearer …" (or ?token= for EventSource, which cannot send headers), compared
+    /// in constant time.</summary>
+    public static bool Accepts(string? authorization, string? queryToken, string token)
+    {
+        var header = authorization ?? "";
+        var supplied = header.StartsWith("Bearer ", StringComparison.Ordinal) ? header[7..] : queryToken ?? "";
+        return token.Length > 0 && CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(supplied), System.Text.Encoding.UTF8.GetBytes(token));
+    }
+
+    /// <summary>A comma-separated id list from a query string; a bad entry is the caller's mistake (400), not a crash.</summary>
+    public static List<T> Ids<T>(string list, string name) where T : struct, IParsable<T> =>
+        list.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => T.TryParse(x, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : throw HqException.Invalid("BAD_REQUEST", $"'{x}' in {name} is not a valid id"))
+            .ToList();
 }
 
 public sealed record IntegrityFinding(string Severity, string Title, string Detail, int Count, IReadOnlyList<string> Examples);

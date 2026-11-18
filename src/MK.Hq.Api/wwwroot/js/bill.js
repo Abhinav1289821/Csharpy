@@ -1,7 +1,7 @@
 // Bill editor for sales, estimates (sales orders), purchases and purchase orders — new bills and corrections.
 // The server prices every change with HQ's exact GST arithmetic; the browser never computes money.
 import { post, get, put, del, opId } from './api.js';
-import { el, money, qty, today, addDays, debounce, toast, modal, lookup } from './util.js';
+import { el, money, qty, today, addDays, debounce, toast, modal, lookup, oneDecimal } from './util.js';
 import { state, firmId, item, party, searchItems, searchParties, paymentModes, ttype, loadCatalogue } from './state.js';
 import { printDocument } from './print.js';
 import { pageUrl } from './capture.js';
@@ -17,6 +17,8 @@ const blankLine = () => ({ itemId: null, unitId: null, name: '', quantity: '', r
 
 export async function billView(root, { kind = 'sale', amendId = null, draft = null, fromOrder = null } = {}) {
   const meta = KINDS[kind];
+  // The firm this bill belongs to, fixed for its lifetime: a firm switch must never send this bill (or its draft) to the other firm.
+  const firm = firmId();
   const doc = {
     kind, date: today(), paymentMode: meta.order ? 0 : kind === 'purchase' ? 1 : 0, accountId: null,
     party: { name: '', town: '', phone: '', mobile: '', gstin: '', address: '' },
@@ -31,12 +33,21 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
   let draftVersion = draft?.version ?? 0;
   let saved = false; // set once this bill is in HQ, so leaving it keeps no draft
   let kept = null; // the bill as last kept in Drafts
+  // One operation id per reviewed request: pressing F10 again after a lost response (or an "outcome unknown" error)
+  // re-sends the SAME id, so the server returns the stored receipt instead of saving the bill twice.
+  let pending = { key: '', id: '' };
+  const operationFor = (body) => {
+    const key = JSON.stringify(body);
+    if (pending.key !== key) pending = { key, id: opId() };
+    return pending.id;
+  };
+  let draftBusy = false;
 
   if (amendId) {
-    original = await get(`/${firmId()}/documents/${amendId}`);
+    original = await get(`/${firm}/documents/${amendId}`);
     loadFromView(original);
   } else if (fromOrder) {
-    const order = await get(`/${firmId()}/documents/${fromOrder}`);
+    const order = await get(`/${firm}/documents/${fromOrder}`);
     loadFromView(order);
     doc.kind = 'sale';
     doc.date = today();
@@ -104,8 +115,8 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     const priced = filled(); // the line objects this preview prices, in request order
     try {
       const p = original
-        ? await post(`/${firmId()}/documents/${original.summary.documentId}/amend/preview`, { operationId: '', documentId: original.summary.documentId, expectedHash: '', document: req, lineIds: lineIds(), allocations: 'preserve' })
-        : await post(`/${firmId()}/documents/preview`, req);
+        ? await post(`/${firm}/documents/${original.summary.documentId}/amend/preview`, { operationId: '', documentId: original.summary.documentId, expectedHash: '', document: req, lineIds: lineIds(), allocations: 'preserve' })
+        : await post(`/${firm}/documents/preview`, req);
       if (key !== previewKey) return;
       preview = original ? { ...p.replacement, hash: p.hash, warnings: p.warnings, released: p.releasedAllocations } : p;
       preview.priced = priced;
@@ -248,7 +259,14 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     const it = l.itemId ? item(l.itemId, l.unitId) : null;
     const num = (key, cls) => {
       const input = el('input', { class: 'num ' + cls, value: l[key], inputmode: 'decimal' });
-      input.addEventListener('input', () => { l[key] = input.value.replace(/[^0-9.]/g, ''); if (key === 'quantity') markStock(); schedulePreview(); });
+      input.addEventListener('input', () => {
+        // Digits and ONE decimal point: "1..5" used to pass, then read as not-a-number and silently drop the line from the bill.
+        const clean = oneDecimal(input.value);
+        if (clean !== input.value) input.value = clean;
+        l[key] = clean;
+        if (key === 'quantity') markStock();
+        schedulePreview();
+      });
       input.addEventListener('keydown', (e) => {
         if (e.key !== 'Enter') return;
         e.preventDefault();
@@ -321,34 +339,36 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
 
   // ---------------------------------------------------------------- save
   async function save() {
-    if (busy) return;
+    if (busy || saved) return; // a saved bill is never saved again from this screen (e.g. after a failed print)
     busy = true;
     saveBtn.disabled = true;
     try {
       previewKey = '';
       await refreshPreview();
-      if (!preview) return;
+      // F10 that cannot save says why (no items yet, or what HQ refused) instead of doing nothing.
+      if (!preview) { toast(status.querySelector('.issue.err')?.textContent || (filled().length ? 'This bill cannot be saved yet' : 'Add items to the bill first'), true); return; }
       if (!original && !KINDS[doc.kind].order && doc.paymentMode === 0 && !doc.party.name.trim()) { toast('Enter the customer name', true); header.querySelector('.lookup input')?.focus(); return; }
       const req = request();
       let receipt;
       if (original) {
         const ok = await confirmAmend();
         if (!ok) return;
-        receipt = await post(`/${firmId()}/documents/${original.summary.documentId}/amend`,
-          { operationId: opId(), documentId: original.summary.documentId, expectedHash: preview.hash, document: req, lineIds: lineIds(), allocations: ok });
+        const body = { documentId: original.summary.documentId, expectedHash: preview.hash, document: req, lineIds: lineIds(), allocations: ok };
+        receipt = await post(`/${firm}/documents/${original.summary.documentId}/amend`, { operationId: operationFor(body), ...body });
         saved = true;
         toast(`Saved changes to ${receipt.reference}`);
         location.hash = `#/doc/${receipt.documentId}`;
         return;
       }
-      receipt = await post(`/${firmId()}/documents`, { operationId: opId(), expectedHash: preview.hash, document: req });
+      const body = { expectedHash: preview.hash, document: req };
+      receipt = await post(`/${firm}/documents`, { operationId: operationFor(body), ...body });
       saved = true;
       if (doc.capture?.id) {
         // Remember "this wording means this HQ item" so the next bill from the same supplier matches itself.
         const learned = filled().filter((l) => l.sourceText).map((l) => ({ sourceText: l.sourceText, name: l.written?.name ?? null, itemId: l.itemId, unitId: l.unitId }));
-        post(`/${firmId()}/captures/${doc.capture.id}/learn`, { documentId: receipt.documentId, reference: receipt.reference, lines: learned }).catch(() => {});
+        post(`/${firm}/captures/${doc.capture.id}/learn`, { documentId: receipt.documentId, reference: receipt.reference, lines: learned }).catch(() => {});
       }
-      if (draftId) { try { await del(`/${firmId()}/drafts/${draftId}`); } catch { /* already gone */ } }
+      if (draftId) { try { await del(`/${firm}/drafts/${draftId}`); } catch { /* already gone */ } }
       loadCatalogue().catch(() => {});
       await afterSave(receipt);
     } catch (e) {
@@ -385,20 +405,29 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
         el('button', { class: 'btn primary', onclick: () => close('new') }, 'Next bill (Enter)')),
     ]);
     window.removeEventListener('hashchange', onLeave);
+    window.removeEventListener('mk:leave', onLeave);
     window.removeEventListener('beforeunload', onUnload);
-    if (choice === 'print') { await printDocument(r.documentId); billView(root, { kind: doc.kind }); }
+    if (choice === 'print') {
+      // The bill is saved whatever happens to the print; a print error must not leave it on screen looking unsaved.
+      try { await printDocument(r.documentId); } catch (e) { toast(`${r.reference} is saved, but printing failed: ${e.message}. Print it from Bills.`, true); }
+      billView(root, { kind: doc.kind });
+    }
     else if (choice === 'open') location.hash = `#/doc/${r.documentId}`;
     else billView(root, { kind: doc.kind });
   }
 
   async function saveDraft(quiet = false) {
-    const id = draftId ?? crypto.randomUUID();
-    const title = `${KINDS[doc.kind].title} · ${doc.party.name || party(doc.accountId)?.name || 'no party'} · ${filled().length} ${filled().length === 1 ? 'line' : 'lines'}`;
-    const saved = await put(`/${firmId()}/drafts/${id}`, { kind: doc.kind, title, payload: doc, version: draftVersion });
-    draftId = saved.id;
-    draftVersion = saved.version;
-    kept = JSON.stringify(doc);
-    toast(quiet ? `Unsaved ${KINDS[doc.kind].title.toLowerCase()} kept in Drafts` : 'Draft saved (not in HQ yet)');
+    if (draftBusy) return; // a double click must not create two drafts (draftId is still null until the first returns)
+    draftBusy = true;
+    try {
+      const id = draftId ?? crypto.randomUUID();
+      const title = `${KINDS[doc.kind].title} · ${doc.party.name || party(doc.accountId)?.name || 'no party'} · ${filled().length} ${filled().length === 1 ? 'line' : 'lines'}`;
+      const stored = await put(`/${firm}/drafts/${id}`, { kind: doc.kind, title, payload: doc, version: draftVersion });
+      draftId = stored.id;
+      draftVersion = stored.version;
+      kept = JSON.stringify(doc);
+      toast(quiet ? `Unsaved ${KINDS[doc.kind].title.toLowerCase()} kept in Drafts` : 'Draft saved (not in HQ yet)');
+    } finally { draftBusy = false; }
   }
 
   // ---------------------------------------------------------------- layout
@@ -407,7 +436,7 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     el('div', { class: 'page-head' },
       el('div', {}, el('h1', {}, original ? `Edit ${original.summary.reference}` : doc.sourceOrderId ? 'Sale from order' : KINDS[doc.kind].title),
         el('div', { class: 'muted' }, original ? `${original.summary.typeName} · ${original.party.name}` : 'Fill the party, then type item names below.')),
-      el('div', { class: 'row' }, !original ? el('button', { class: 'btn', onclick: saveDraft }, 'Save draft') : null, saveBtn)),
+      el('div', { class: 'row' }, !original ? el('button', { class: 'btn', onclick: () => saveDraft(false).catch((e) => toast(e.message, true)) }, 'Save draft') : null, saveBtn)),
     el('div', { class: 'panel bill-head-panel' }, header),
     doc.capture ? photoPanel() : null,
     el('div', { class: 'bill-layout' },
@@ -449,11 +478,14 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
   const unsaved = () => !saved && !original && filled().length > 0 && JSON.stringify(doc) !== kept;
   const onLeave = () => {
     window.removeEventListener('hashchange', onLeave);
+    window.removeEventListener('mk:leave', onLeave);
     window.removeEventListener('beforeunload', onUnload);
     if (unsaved()) saveDraft(true).catch((e) => toast('Could not keep the unsaved bill: ' + e.message, true));
   };
   const onUnload = (e) => { if (alive.isConnected && unsaved()) { e.preventDefault(); e.returnValue = ''; } };
   window.addEventListener('hashchange', onLeave);
+  // A firm switch replaces the screen without a hashchange; app.js announces it with mk:leave.
+  window.addEventListener('mk:leave', onLeave);
   window.addEventListener('beforeunload', onUnload);
   renderHeader();
   renderLines();

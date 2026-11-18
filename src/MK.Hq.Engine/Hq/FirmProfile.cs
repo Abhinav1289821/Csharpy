@@ -57,40 +57,71 @@ public sealed class FirmProfile
     }
 }
 
-public sealed class FirmProfiles(TimeProvider time)
+public sealed class FirmProfiles
 {
     private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(30);
+    private readonly TimeProvider _time;
+    private readonly Func<HqFirm, CancellationToken, Task<FirmProfile>> _load;
     private readonly ConcurrentDictionary<string, (FirmProfile Profile, DateTimeOffset At)> _cache = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
+    // Bumped by Invalidate: a load that began before a repair changed HQ's settings (round-off type, charge accounts) must not
+    // be cached after it, or the old settings would be served as fresh for another 30 seconds.
+    private readonly Dictionary<string, long> _generations = new();
+    private readonly object _sync = new();
+
+    public FirmProfiles(TimeProvider time) : this(time, async (firm, ct) =>
+    {
+        await using var s = await firm.OpenAsync(ct);
+        return await LoadAsync(firm, s);
+    }) { }
+
+    /// <summary>For tests: any loader in place of SQL Server.</summary>
+    public FirmProfiles(TimeProvider time, Func<HqFirm, CancellationToken, Task<FirmProfile>> load)
+    {
+        _time = time;
+        _load = load;
+    }
 
     public async Task<FirmProfile> GetAsync(HqFirm firm, CancellationToken ct = default)
     {
-        if (_cache.TryGetValue(firm.Id, out var hit) && time.GetUtcNow() - hit.At < Ttl) return hit.Profile;
+        if (_cache.TryGetValue(firm.Id, out var hit) && _time.GetUtcNow() - hit.At < Ttl) return hit.Profile;
         await _gate.WaitAsync(ct);
         try
         {
-            if (_cache.TryGetValue(firm.Id, out hit) && time.GetUtcNow() - hit.At < Ttl) return hit.Profile;
-            await using var s = await firm.OpenAsync(ct);
-            var profile = await LoadAsync(firm, s);
-            _cache[firm.Id] = (profile, time.GetUtcNow());
+            if (_cache.TryGetValue(firm.Id, out hit) && _time.GetUtcNow() - hit.At < Ttl) return hit.Profile;
+            long generation;
+            lock (_sync) generation = _generations.GetValueOrDefault(firm.Id);
+            var profile = await _load(firm, ct);
+            lock (_sync)
+                if (_generations.GetValueOrDefault(firm.Id) == generation) _cache[firm.Id] = (profile, _time.GetUtcNow());
             return profile;
         }
         finally { _gate.Release(); }
     }
 
-    public void Invalidate(string firmId) => _cache.TryRemove(firmId, out _);
+    public void Invalidate(string firmId)
+    {
+        lock (_sync)
+        {
+            _generations[firmId] = _generations.GetValueOrDefault(firmId) + 1;
+            _cache.TryRemove(firmId, out _);
+        }
+    }
 
     public static async Task<FirmProfile> LoadAsync(HqFirm firm, HqSession s)
     {
-        var config = (await s.QueryAsync<HqConfig>("""
+        var configs = await s.QueryAsync<HqConfig>("""
             SELECT CAST(ISNULL(DoNotSaveUserchanges,0) AS int) SkipAudit, CAST(ISNULL(SaveUserchangesAuditDatabase,0) AS int) SeparateAuditDatabase,
               CAST(ISNULL(Bill2Bill_Comp,0) AS int) BillWise, CAST(ISNULL(Update_RecRates,0) AS int) UpdateRecentRates,
               CAST(ISNULL(UpdateRecent_Pur_Rate_Disc_To_ItemMast,0) AS int) UpdatePurchaseRates, CAST(ISNULL(Enable_CostCode_Gen_Inward,0) AS int) CostCodeGeneration,
               CAST(ISNULL(SetSaleWiseUnique_BillNo,0) AS int) GlobalSaleNumbers, CAST(ISNULL(CheckCreditLimit,0) AS int) CreditLimitCheck,
               CAST(ISNULL(DefBankActID_ForUPI,0) AS bigint) DefaultUpiBank
             FROM dbo.Configs
-            """)).SingleOrDefault() ?? throw HqException.Unsupported("HQ_CONFIGURATION_MISSING", "HQ Configs row is missing");
-
+            """);
+        // HQ keeps exactly one settings row. Two would have thrown a bare InvalidOperationException (an "internal error"
+        // that also hid the firm's other details from the firm list); say which settings are in doubt instead.
+        Guard.Supported(configs.Count <= 1, "HQ_CONFIGURATION_UNSUPPORTED", $"HQ has {configs.Count} settings rows (Configs) in {firm.Name}; it keeps one");
+        var config = configs.SingleOrDefault() ?? throw HqException.Unsupported("HQ_CONFIGURATION_MISSING", "HQ Configs row is missing");
         var types = await s.QueryAsync<TransactionType>("""
             SELECT CAST(TT_ID AS int) TtId, RTRIM(ISNULL(Ttype,'')) Name, RTRIM(ISNULL(Vouchtype,'')) VouchType, RTRIM(ISNULL(Series,'')) Series,
               CAST(ISNULL(SeriesType,0) AS int) SeriesType, CAST(ISNULL(Firstor,0) AS int) Firstor, CAST(ISNULL(Inc_Tax,0) AS int) IncTax,

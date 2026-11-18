@@ -281,14 +281,14 @@ public sealed class ItemMasterService(FirmRegistry firms, WriteCoordinator coord
         var images = editing ? new[] { 1, 2, 3, 4 }.Select(i => HqForm.ReloadedTrimmed(Old("Item_Image" + i))).ToArray() : ["", "", "", ""];
         steps.Add(new CallStep("Item images", "IQItems_Mast_Update_ItemImages", new Args().Set("mItem_ID", idArg)
             .Set("mItem_Image1", images[0]).Set("mItem_Image2", images[1]).Set("mItem_Image3", images[2]).Set("mItem_Image4", images[3])));
-        steps.Add(new SqlStep("Replace unit row", "DELETE FROM dbo.IQItems_Units WHERE Recd_ID=0 AND Item_ID=@id", new Args().Set("id", idArg)));
+        steps.Add(new SqlStep("Replace unit row", "DELETE FROM dbo.IQItems_Units WHERE ISNULL(Recd_ID,0)=0 AND Item_ID=@id", new Args().Set("id", idArg)));
         steps.Add(new CallStep("Unit and rates", "IQItems_Units_insert", u));
         foreach (var (ttId, actId, use) in ttypeAccounts)
             steps.Add(new CallStep($"Account for {use}", "ttype_acnt_insert", new Args().Set("ic_id", idArg).Set("tt_id", ttId).Set("act_id", actId)
                 .Set("set_no", 0).Set("ent_date", new Clock(ClockField.Day)).Set("ent_uid", options.HqUserId).Set("edmode", 0)));
         steps.Add(new VerifyStep("Verify item saved", "SELECT COUNT(*) FROM dbo.IQItems_Mast WHERE Item_ID=@id AND Item_Name=@name AND Item_Code=@code",
             new Args().Set("id", idArg).Set("name", name).Set("code", code), 1, "HQ_SAVE_MISMATCH", "HQ did not store the item as entered"));
-        steps.Add(new VerifyStep("Verify one unit row", "SELECT COUNT(*) FROM dbo.IQItems_Units WHERE Item_ID=@id AND Recd_ID=0", new Args().Set("id", idArg), 1,
+        steps.Add(new VerifyStep("Verify one unit row", "SELECT COUNT(*) FROM dbo.IQItems_Units WHERE Item_ID=@id AND ISNULL(Recd_ID,0)=0", new Args().Set("id", idArg), 1,
             "HQ_SAVE_MISMATCH", "HQ stored a different unit row"));
 
         if (editing && rateChanged) warnings.Add("The GST rate changed: all of the item's tax accounts are re-chosen for the new rate, as HQ does.");

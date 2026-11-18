@@ -41,7 +41,8 @@ public sealed record ResolvedDocument(
 {
     public DocumentKind Kind => Request.Kind;
     public string Notes => (Request.Notes ?? "").Trim();
-    public string Suffix => (Request.NumberSuffix ?? "").Trim();
+    /// <summary>FrmInwards' txtTExtn: one character, typed in capitals (CharacterCasing.Upper).</summary>
+    public string Suffix => (Request.NumberSuffix ?? "").Trim().ToUpperInvariant();
 }
 
 public sealed class DocumentResolver(HqOptions options)
@@ -62,7 +63,7 @@ public sealed class DocumentResolver(HqOptions options)
           CAST(ISNULL(im.NewGSTRate_TextileItems,0) AS decimal(19,4)) TextileRate, CAST(ISNULL(im.ItemPriceAbove_TextitleItems,0) AS decimal(19,4)) TextileThreshold
         FROM dbo.IQItems_Mast im JOIN dbo.IQItems_Units iu ON im.Item_ID=iu.Item_ID
         LEFT JOIN dbo.Ttype_Acnt ta ON ta.Ic_Id=im.Item_ID AND ta.TT_ID=@tt
-        WHERE im.Item_ID=@item AND iu.UNit_Id=@unit
+        WHERE im.Item_ID=@item AND iu.UNit_Id=@unit AND ISNULL(iu.Recd_ID,0)=0
         """;
 
     private sealed record ItemRow(long PrimaryUnitId, int UnitEquivalence, decimal IssueConversion, int StockConversion, decimal Mrp, long BaseAccountId,
@@ -83,7 +84,12 @@ public sealed class DocumentResolver(HqOptions options)
         firm.RequireInPeriod(r.Date);
         Guard.Require(r.Lines.Count is > 0 and <= 300, "INVALID_LINES", "A bill needs between 1 and 300 lines");
         Guard.Require((r.Notes ?? "").Length <= 1500, "NARRATION_TOO_LONG", "Narration can be at most 1500 characters");
-        Guard.Require((r.NumberSuffix ?? "").Trim().Length <= 3, "INVALID_SUFFIX", "Number suffix can be at most 3 characters");
+        // IQDoc_Header.TExtn holds one character (HQ's box has MaxLength 1); a longer suffix got past this check and then
+        // failed inside the save with SQL Server's "String or binary data would be truncated".
+        var suffix = (r.NumberSuffix ?? "").Trim();
+        Guard.Require(suffix.Length <= 1, "INVALID_SUFFIX", "The number suffix can be only one character");
+        Guard.Require((r.Message ?? "").Length <= 255, "MESSAGE_TOO_LONG", "The bill message can be at most 255 characters (HQ keeps no more)");
+        RequireTypedParty(r.Party);
         Guard.Supported(!r.Interstate || options.AllowInterstate, "HQ_INVOICE_PROFILE_UNSUPPORTED", "Interstate bills are switched off in settings");
         Guard.Supported(!(r.Interstate && r.Kind.IsOrder()), "HQ_INVOICE_PROFILE_UNSUPPORTED", "HQ has no interstate order type configured");
 
@@ -151,7 +157,11 @@ public sealed class DocumentResolver(HqOptions options)
                 ?? throw HqException.NotFound("HQ_ITEM_NOT_FOUND", at + "item/unit not found in HQ");
             Guard.Require(item.Active, "HQ_ITEM_INACTIVE", at + $"{item.Name} is inactive in HQ");
             Guard.Require(item.TaxConfigured, "HQ_ITEM_TAX_MISSING", at + $"{item.Name} has no GST rates in HQ");
-            var row = (await s.QueryAsync<ItemRow>(ItemSql, new { inward = r.Kind.IsInward() ? 1 : 0, tt = type.TtId, item = line.ItemId, unit = line.UnitId })).Single();
+            // IQItems_Units has no unique key: a repeated unit row would otherwise end the review with a bare
+            // "Sequence contains more than one element".
+            var rows = await s.QueryAsync<ItemRow>(ItemSql, new { inward = r.Kind.IsInward() ? 1 : 0, tt = type.TtId, item = line.ItemId, unit = line.UnitId });
+            Guard.Supported(rows.Count == 1, "HQ_ITEM_UNITS_UNSUPPORTED", at + $"{item.Name} has {(rows.Count == 0 ? "no" : "more than one")} item unit row for this unit in HQ; correct the item in HQ");
+            var row = rows[0];
             Guard.Supported(row.Serial == 0 && row.Cess == 0 && row.AddlCess == 0 && row.Textile == 0, "HQ_ITEM_PROFILE_UNSUPPORTED", at + "serial-number, cess or textile-rate items are not supported");
             Guard.Supported(row.ThirdConversion is 0 or 1, "HQ_ITEM_PROFILE_UNSUPPORTED", at + "third-pack conversions are not supported");
             Guard.Supported(row.UnitEquivalence > 0 && row.IssueConversion > 0, "HQ_UNIT_UNSUPPORTED", at + "the unit conversion in HQ is not set");
@@ -248,6 +258,18 @@ public sealed class DocumentResolver(HqOptions options)
             address, snapshot, accountTown, items, quote, ledger, charges, rounding, salesperson, due, message, orderLines, warnings);
     }
 
+    /// <summary>What IQCash_TRAN can hold of a typed (cash or bank) party. Checked before review: a longer value was refused
+    /// only when saving (or, for the address, which the procedure accepts up to 510 characters into a 255-character column,
+    /// failed inside the save with SQL Server's truncation error).</summary>
+    public static void RequireTypedParty(PartySnapshot? p)
+    {
+        if (p is null) return;
+        // Text is stored as typed (spaces included); the GSTIN and state are trimmed first.
+        foreach (var (value, what, max) in new[] { (p.Name, "party name", 100), (p.Town, "town", 50), (p.Phone, "phone", 50), (p.Mobile, "mobile", 50),
+                     (p.Address, "address", 255), (p.Gstin?.Trim(), "GSTIN", 15), (p.State?.Trim(), "state", 100) })
+            Guard.Require((value ?? "").Length <= max, "PARTY_FIELD_TOO_LONG", $"The {what} can be at most {max} characters");
+    }
+
     private PreviewParty Snapshot(FirmProfile profile, DocumentRequest r, Settlement settlement, PartyAccount head, Dictionary<string, object?> address, List<string> warnings)
     {
         var p = r.Party ?? new PartySnapshot();
@@ -302,12 +324,32 @@ public sealed class DocumentResolver(HqOptions options)
             Address: p.Address ?? Master("Add_Line1"));
     }
 
-    private static string NormaliseState(string state)
+    /// <summary>Other spellings a typed (or AI-read) state comes in, folded as <see cref="FoldState"/> does, to HQ's state code.
+    /// HQ's drop-down still uses the old names (Pondicherry, Lakshdweep, Telangana) and keeps 25 and 26 apart.</summary>
+    private static readonly IReadOnlyDictionary<string, string> StateAliases = new Dictionary<string, string>
+    {
+        ["puducherry"] = "34", ["lakshadweep"] = "31", ["lakshadweep islands"] = "31", ["andaman and nicobar"] = "35", ["telengana"] = "36",
+        ["orissa"] = "21", ["uttaranchal"] = "05", ["new delhi"] = "07", ["nct of delhi"] = "07", ["jammu kashmir"] = "01",
+        // The merged UT (GST code 26 since 2020) is HQ's "26-Dadra & Nagar Haveli".
+        ["dadra and nagar haveli and daman and diu"] = "26",
+    };
+
+    /// <summary>A typed state as HQ's caption ("37-Andhra Pradesh"): by its two-digit code, or by name ignoring case,
+    /// punctuation and "&amp;" versus "and". Anything unrecognised is kept as typed (and then refused as not local).</summary>
+    public static string NormaliseState(string state)
     {
         state = state.Trim();
-        if (state.Length >= 2 && char.IsDigit(state[0]) && char.IsDigit(state[1])) return Gstin.HqStateCaption(state[..2]) ?? state;
-        var match = Gstin.States.FirstOrDefault(kv => string.Equals(kv.Value, state, StringComparison.OrdinalIgnoreCase));
-        return match.Key is null ? state : $"{match.Key}-{match.Value}";
+        if (state.Length >= 2 && char.IsAsciiDigit(state[0]) && char.IsAsciiDigit(state[1])) return Gstin.HqStateCaption(state[..2]) ?? state;
+        var folded = FoldState(state);
+        var match = Gstin.States.FirstOrDefault(kv => FoldState(kv.Value) == folded);
+        if (match.Key is not null) return $"{match.Key}-{match.Value}";
+        return StateAliases.TryGetValue(folded, out var code) ? Gstin.HqStateCaption(code) ?? state : state;
+    }
+
+    private static string FoldState(string name)
+    {
+        var letters = new string(name.ToLowerInvariant().Replace("&", " and ").Select(c => char.IsAsciiLetterLower(c) ? c : ' ').ToArray());
+        return string.Join(' ', letters.Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
     private static async Task<(long Base, long Tax, long Sgst)> InterstateLedgersAsync(HqSession s, DocumentKind kind, decimal rate, string at)
@@ -341,13 +383,16 @@ public sealed class DocumentResolver(HqOptions options)
             FROM dbo.IQOrd_Detail o WITH (UPDLOCK, HOLDLOCK) WHERE o.Doc_ID=@id
             """, new { id = r.SourceOrderId });
         var result = new List<long>();
+        // Several lines may draw on one order line; together they may not exceed what is left of it.
+        var drawn = new Dictionary<long, decimal>();
         for (var i = 0; i < r.Lines.Count; i++)
         {
             var link = r.Lines[i].OrderLineId;
             if (link is null) { result.Add(0); continue; }
             var o = lines.FirstOrDefault(l => l.Id == link);
             Guard.Require(o.Id != 0 && o.Item == items[i].Item.ItemId && o.Unit == items[i].Item.UnitId, "INVALID_ORDER_LINK", $"Line {i + 1} does not match its order line");
-            Guard.Require(quote.Lines[i].Quantity <= o.Qty - o.Supplied, "HQ_ORDER_QUANTITY_EXCEEDED", $"Line {i + 1} is more than the order's remaining {Money.Plain(o.Qty - o.Supplied)}", FailureKind.Conflict);
+            var total = drawn[o.Id] = drawn.GetValueOrDefault(o.Id) + quote.Lines[i].Quantity;
+            Guard.Require(total <= o.Qty - o.Supplied, "HQ_ORDER_QUANTITY_EXCEEDED", $"Line {i + 1} is more than the order's remaining {Money.Plain(o.Qty - o.Supplied)}", FailureKind.Conflict);
             result.Add(o.Id);
         }
         return result;

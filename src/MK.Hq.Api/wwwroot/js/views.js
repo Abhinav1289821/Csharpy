@@ -1,8 +1,39 @@
 // Read-side screens: dashboard, document list/view, reports, HQ health, drafts.
 import { get, post, del, opId } from './api.js';
-import { el, money, qty, dmy, today, addDays, toast, confirmBox, lookup, csv, debounce } from './util.js';
-import { state, firmId, searchParties, party } from './state.js';
+import { el, money, qty, dmy, today, addDays, toast, confirmBox, lookup, csv, debounce, newest } from './util.js';
+import { state, firmId, searchParties, party, onChange } from './state.js';
 import { printDocument, invoice } from './print.js';
+
+// A print that fails (document gone, service down) says so instead of doing nothing.
+const print = (id) => printDocument(id).catch((e) => toast(`Could not print: ${e.message}`, true));
+
+// Lists refresh themselves in place when HQ (or another MK window) saves: the operator's search text, dates and the row
+// he is on stay where they are. The subscription retires with the screen (its <main> is replaced on navigation).
+export function live(root, refresh) {
+  const off = onChange((what) => {
+    if (!root.isConnected) return off();
+    if (what === 'changed') keepPlace(root, refresh).catch(() => { /* the live indicator already shows HQ offline */ });
+  });
+  return off;
+}
+
+// Re-render without losing the place: the scroll of each list panel, and the focused row (by position) if the
+// refresh took focus away. A row he moved to meanwhile, or a box he is typing in, is left alone.
+export async function keepPlace(root, refresh) {
+  const rows = () => [...root.querySelectorAll('tr.click')];
+  const active = document.activeElement;
+  const at = active && root.contains(active) && active.matches?.('tr.click') ? rows().indexOf(active) : -1;
+  const scrolls = [...root.querySelectorAll('.scroll')].map((s) => s.scrollTop);
+  await refresh();
+  if (!root.isConnected) return;
+  root.querySelectorAll('.scroll').forEach((s, i) => { if (scrolls[i] !== undefined) s.scrollTop = scrolls[i]; });
+  const lost = !document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected;
+  if (at >= 0 && lost) {
+    const list = rows();
+    const tr = list[Math.min(at, list.length - 1)];
+    if (tr) { tr.tabIndex = -1; tr.focus({ preventScroll: true }); }
+  }
+}
 
 const KIND_TT = { all: '', sales: '506,507', estimates: '249', purchases: '500,501', orders: '248', receipts: '204,205', payments: '206,207', notes: '208,209' };
 const isVoucher = (tt) => tt >= 204 && tt <= 209;
@@ -14,7 +45,17 @@ const modeName = (m) => state.firm.paymentModes.find((x) => x.id === m)?.caption
 
 // ------------------------------------------------------------------ dashboard
 export async function dashboardView(root) {
-  const [d, drafts] = await Promise.all([get(`/${firmId()}/reports/dashboard?day=${today()}`), get(`/${firmId()}/drafts`).catch(() => [])]);
+  const ticket = newest();
+  const refresh = async () => {
+    const current = ticket();
+    const [d, drafts] = await Promise.all([get(`/${firmId()}/reports/dashboard?day=${today()}`), get(`/${firmId()}/drafts`).catch(() => [])]);
+    if (current()) paintDashboard(root, d, drafts);
+  };
+  await refresh();
+  live(root, refresh);
+}
+
+function paintDashboard(root, d, drafts) {
   const card = (label, value, sub, tone = '') => el('div', { class: 'card ' + tone }, el('div', { class: 'label' }, label), el('div', { class: 'value' }, value), sub ? el('div', { class: 'sub' }, sub) : null);
   const action = (href, key, label, hint, primary = false) => el('a', { class: 'action' + (primary ? ' primary' : ''), href },
     el('span', { class: 'action-key' }, key), el('strong', {}, label), el('small', {}, hint));
@@ -51,12 +92,18 @@ function docTable(rows) {
 export async function documentsView(root) {
   const f = { kind: 'all', from: addDays(today(), -30), to: today(), q: '' };
   const out = el('div');
-  const load = async () => {
+  // Typing "ramu" sends r, ra, ram, ramu (debounced, but a slow query still overlaps the next): only the newest
+  // answer may land, or an older, slower one leaves the list showing bills for "ra" under the box saying "ramu".
+  const ticket = newest();
+  const load = async (quiet = false) => {
+    const current = ticket();
     const qs = new URLSearchParams({ take: '300', from: f.from, to: f.to });
     if (KIND_TT[f.kind]) qs.set('tt', KIND_TT[f.kind]);
     if (f.q) qs.set('q', f.q);
-    out.replaceChildren(el('p', { class: 'muted' }, 'Loading…'));
+    // A live refresh keeps the list on screen (and the row he is on) until the new one arrives.
+    if (!quiet) out.replaceChildren(el('p', { class: 'muted' }, 'Loading…'));
     const rows = await get(`/${firmId()}/documents?${qs}`);
+    if (!current()) return;
     out.replaceChildren(el('p', { class: 'muted' }, `${rows.length} documents · total ₹ ${money(rows.reduce((s, r) => s + r.amount, 0))}`), docTable(rows));
   };
   const reload = debounce(() => load().catch((e) => toast(e.message, true)), 250);
@@ -70,6 +117,7 @@ export async function documentsView(root) {
     out);
   await load();
   root.querySelector('[data-rows]')?.focus();
+  live(root, () => load(true));
 }
 
 export async function documentView(root, id) {
@@ -92,7 +140,7 @@ export async function documentView(root, id) {
     el('div', { class: 'row spread' },
       el('div', {}, el('h1', {}, `${s.typeName} ${s.reference}`), el('div', { class: 'muted' }, `${dmy(s.date)} · ${d.party.name} · ${voucher ? '' : d.paymentCaption + ' · '}entered on ${s.enteredOn || 'HQ'}${s.modifyCnt > 2 ? ` · edited ${s.modifyCnt - 2}×` : ''}`)),
       el('div', { class: 'row' },
-        !voucher ? el('button', { class: 'btn primary', onclick: () => printDocument(id) }, 'Print (P)') : null,
+        !voucher ? el('button', { class: 'btn primary', onclick: () => print(id) }, 'Print (P)') : null,
         s.ttId === 249 ? el('a', { class: 'btn', href: `#/from-order/${id}` }, 'Make sale bill (S)') : null,
         editable ? el('a', { class: 'btn', href: `#/edit/${kindOf}/${id}` }, 'Edit (E)') : null,
         voucher ? el('a', { class: 'btn', href: `#/edit-voucher/${s.ttId}/${id}` }, 'Correct (E)') : null,
@@ -110,7 +158,7 @@ export async function documentView(root, id) {
     if (!alive.isConnected) return document.removeEventListener('keydown', keys);
     if (e.ctrlKey || e.altKey || document.querySelector('.modal-back') || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
     const k = e.key.toLowerCase();
-    if (k === 'p' && !voucher) { e.preventDefault(); printDocument(id); }
+    if (k === 'p' && !voucher) { e.preventDefault(); print(id); }
     else if (k === 'e' && (editable || voucher)) { e.preventDefault(); location.hash = editable ? `#/edit/${kindOf}/${id}` : `#/edit-voucher/${s.ttId}/${id}`; }
     else if (k === 's' && s.ttId === 249) { e.preventDefault(); location.hash = `#/from-order/${id}`; }
   };
@@ -124,9 +172,12 @@ export async function ledgerView(root, accountId) {
   const pick = lookup({ placeholder: 'Search any account…', value: accountId ? party(accountId)?.name ?? '' : '', autofocus: !accountId,
     search: (t) => searchParties(t).map((p) => ({ label: p.name, hint: `${p.type} · ₹${money(p.balance)}`, value: p })),
     onPick: (p) => { location.hash = `#/ledger/${p.accountId}`; } });
+  const ticket = newest(); // changing From then To quickly: the answer for the newer dates wins
   const load = async () => {
     if (!accountId) return;
+    const current = ticket();
     const r = await get(`/${firmId()}/reports/ledger/${accountId}?from=${f.from}&to=${f.to}`);
+    if (!current()) return;
     // The balance is the question at the counter ("how much do I owe?"), so it leads.
     out.replaceChildren(el('div', { class: 'ledger-head' },
       el('div', {}, el('h2', {}, r.accountName), el('div', { class: 'muted' }, `${r.accountType} · ${dmy(r.from)} to ${dmy(r.to)}`)),
@@ -141,16 +192,27 @@ export async function ledgerView(root, accountId) {
             el('td', { class: 'n' }, l.debit ? money(l.debit) : ''), el('td', { class: 'n' }, l.credit ? money(l.credit) : ''), el('td', { class: 'n' }, bal(l.balance))))),
         el('tfoot', {}, el('tr', {}, el('td', { colspan: 4 }, 'Closing'), el('td', { class: 'n' }, money(r.debit)), el('td', { class: 'n' }, money(r.credit)), el('td', { class: 'n' }, bal(r.closing)))))));
   };
-  const date = (k) => { const x = el('input', { type: 'date', value: f[k] }); x.addEventListener('change', () => { f[k] = x.value; load(); }); return x; };
+  const date = (k) => { const x = el('input', { type: 'date', value: f[k] }); x.addEventListener('change', () => { f[k] = x.value; load().catch((e) => toast(e.message, true)); }); return x; };
   root.replaceChildren(el('h1', {}, 'Account ledger'), el('div', { class: 'panel row' }, el('div', { class: 'grow' }, pick.wrap),
     el('label', { class: 'field' }, el('span', {}, 'From'), date('from')), el('label', { class: 'field' }, el('span', {}, 'To'), date('to'))), out);
   await load();
+  if (accountId) live(root, load);
 }
 const bal = (v) => money(Math.abs(v)) + (v >= 0 ? ' Dr' : ' Cr');
 
 // ------------------------------------------------------------------ outstanding
 export async function outstandingView(root, side = 'receivable') {
-  const rows = await get(`/${firmId()}/reports/outstanding?side=${side}`);
+  const ticket = newest();
+  const refresh = async () => {
+    const current = ticket();
+    const rows = await get(`/${firmId()}/reports/outstanding?side=${side}`);
+    if (current()) paintOutstanding(root, side, rows);
+  };
+  await refresh();
+  live(root, refresh);
+}
+
+function paintOutstanding(root, side, rows) {
   const total = rows.reduce((s, r) => s + r.balance, 0);
   root.replaceChildren(
     el('div', { class: 'row spread' }, el('h1', {}, side === 'receivable' ? 'To receive (customers)' : 'To pay (suppliers)'),
@@ -169,8 +231,11 @@ export async function outstandingView(root, side = 'receivable') {
 export async function reportsView(root) {
   const f = { kind: 'sales', from: today().slice(0, 8) + '01', to: today() };
   const out = el('div');
+  const ticket = newest(); // Sales then Purchases quickly: the register shown is the one now selected
   const load = async () => {
+    const current = ticket();
     const r = await get(`/${firmId()}/reports/register?kind=${f.kind}&from=${f.from}&to=${f.to}`);
+    if (!current()) return;
     const cols = [{ title: 'Date', get: 'date' }, { title: 'No', get: 'reference' }, { title: 'Supplier bill', get: 'supplierBill' }, { title: 'Party', get: 'party' }, { title: 'GSTIN', get: 'gstin' },
       { title: 'Taxable', get: 'taxable' }, { title: 'CGST', get: 'cgst' }, { title: 'SGST', get: 'sgst' }, { title: 'IGST', get: 'igst' }, { title: 'Round off', get: 'roundOff' }, { title: 'Total', get: 'total' }];
     out.replaceChildren(
@@ -188,50 +253,46 @@ export async function reportsView(root) {
           el('td', {}, dmy(x.date)), el('td', {}, x.reference), el('td', {}, x.supplierBill), el('td', {}, x.party), el('td', {}, x.gstin),
           ...[x.taxable, x.cgst, x.sgst, x.igst, x.roundOff, x.total].map((v) => el('td', { class: 'n' }, money(v)))))))));
   };
-  const input = (k, attrs) => { const x = el('input', { value: f[k], ...attrs }); x.addEventListener('change', () => { f[k] = x.value; load(); }); return x; };
+  const reload = () => load().catch((e) => toast(e.message, true));
+  const input = (k, attrs) => { const x = el('input', { value: f[k], ...attrs }); x.addEventListener('change', () => { f[k] = x.value; reload(); }); return x; };
   root.replaceChildren(el('h1', {}, 'Registers & GST'),
-    el('div', { class: 'panel row' }, el('select', { onchange: (e) => { f.kind = e.target.value; load(); } }, el('option', { value: 'sales' }, 'Sales'), el('option', { value: 'purchases' }, 'Purchases')),
+    el('div', { class: 'panel row' }, el('select', { onchange: (e) => { f.kind = e.target.value; reload(); } }, el('option', { value: 'sales' }, 'Sales'), el('option', { value: 'purchases' }, 'Purchases')),
       el('label', { class: 'field' }, el('span', {}, 'From'), input('from', { type: 'date' })), el('label', { class: 'field' }, el('span', {}, 'To'), input('to', { type: 'date' }))), out);
   await load();
 }
 
 // ------------------------------------------------------------------ stock
 export async function stockView(root) {
-  const rows = await get(`/${firmId()}/reports/stock`);
+  let rows = await get(`/${firmId()}/reports/stock`);
   let shown = rows;
   const body = el('tbody');
-  const render = () => body.replaceChildren(...shown.slice(0, 600).map((r) => el('tr', {}, el('td', {}, r.name), el('td', {}, r.group), el('td', {}, r.unit),
-    el('td', { class: 'n' }, qty(r.stock)), el('td', { class: 'n' }, money(r.purchaseRate)), el('td', { class: 'n' }, money(r.saleRate)), el('td', { class: 'n' }, money(r.value)), el('td', {}, dmy(r.lastSale)))));
+  const summary = el('p', { class: 'muted' });
+  const render = () => {
+    summary.textContent = `${rows.length} items · stock value at purchase rate ₹ ${money(rows.reduce((s, r) => s + Math.max(0, r.value), 0))} · negative stock: ${rows.filter((r) => r.stock < 0).length}`;
+    body.replaceChildren(...shown.slice(0, 600).map((r) => el('tr', {}, el('td', {}, r.name), el('td', {}, r.group), el('td', {}, r.unit),
+      el('td', { class: 'n' }, qty(r.stock)), el('td', { class: 'n' }, money(r.purchaseRate)), el('td', { class: 'n' }, money(r.saleRate)), el('td', { class: 'n' }, money(r.value)), el('td', {}, dmy(r.lastSale)))));
+  };
   const search = el('input', { placeholder: 'Filter items…', 'data-rows': '' });
-  search.addEventListener('input', () => { const t = search.value.toLowerCase(); shown = rows.filter((r) => (r.name + ' ' + r.group + ' ' + r.code).toLowerCase().includes(t)); render(); });
+  const filter = () => { const t = search.value.toLowerCase(); shown = rows.filter((r) => (r.name + ' ' + r.group + ' ' + r.code).toLowerCase().includes(t)); };
+  search.addEventListener('input', () => { filter(); render(); });
   root.replaceChildren(el('div', { class: 'row spread' }, el('h1', {}, 'Stock'), el('div', { class: 'row' }, search,
       el('button', { class: 'btn small', onclick: () => csv(shown, [{ title: 'Item', get: 'name' }, { title: 'Group', get: 'group' }, { title: 'Stock', get: 'stock' }, { title: 'Purchase rate', get: 'purchaseRate' }, { title: 'Sale rate', get: 'saleRate' }, { title: 'Value', get: 'value' }], 'stock.csv') }, 'Export CSV'))),
-    el('p', { class: 'muted' }, `${rows.length} items · stock value at purchase rate ₹ ${money(rows.reduce((s, r) => s + Math.max(0, r.value), 0))} · negative stock: ${rows.filter((r) => r.stock < 0).length}`),
+    summary,
     el('div', { class: 'panel scroll' }, el('table', { class: 'grid' }, el('thead', {}, el('tr', {}, ['Item', 'Group', 'Unit', 'Stock', 'Purchase', 'Sale', 'Value', 'Last sold'].map((h, i) => el('th', { class: i >= 3 && i <= 6 ? 'n' : '' }, h)))), body)));
   render();
+  // A sale saved in HQ changes stock: new figures, same filter text.
+  const ticket = newest();
+  live(root, async () => {
+    const current = ticket();
+    const fresh = await get(`/${firmId()}/reports/stock`);
+    if (!current()) return;
+    rows = fresh;
+    filter();
+    render();
+  });
 }
 
-// ------------------------------------------------------------------ HQ health
-export async function healthView(root) {
-  root.replaceChildren(el('h1', {}, 'HQ health'), el('p', { class: 'muted' }, 'Checking the HQ database…'));
-  const [r, ops] = await Promise.all([get(`/${firmId()}/integrity`), get(`/operations?firm=${firmId()}&take=50`)]);
-  const pill = (s) => el('span', { class: 'pill ' + ({ ok: 'ok', warning: 'warn', error: 'err' }[s] ?? '') }, s === 'ok' ? 'OK' : s);
-  root.replaceChildren(
-    el('h1', {}, 'HQ health'),
-    el('p', { class: 'muted' }, 'Read-only checks of the HQ database. MK never changes these on its own; each item says what to fix in HQ.'),
-    el('div', { class: 'stack' }, r.findings.map((f) => el('div', { class: 'panel' },
-      el('div', { class: 'row spread' }, el('strong', {}, f.title), el('div', { class: 'row' }, f.count ? el('span', { class: 'muted' }, f.count) : null, pill(f.severity))),
-      el('div', { class: 'muted' }, f.detail),
-      f.examples.length ? el('div', { style: { marginTop: '6px', fontFamily: 'var(--mono)', fontSize: '12px' } }, f.examples.join('  ·  ')) : null,
-      f.title === 'HQ procedure contract' && f.severity !== 'ok' ? el('button', { class: 'btn danger', style: { marginTop: '8px' }, onclick: async () => {
-        if (await confirmBox('Accept the new HQ procedures?', [el('p', {}, 'Only do this after the parity tests pass against the updated HQ.')], 'Accept', true)) { await post(`/${firmId()}/contract/accept`); healthView(root); }
-      } }, 'Accept updated HQ') : null))),
-    el('h2', {}, 'Recent saves (MK journal)'),
-    el('div', { class: 'panel scroll' }, el('table', { class: 'grid' }, el('thead', {}, el('tr', {}, ['When', 'What', 'Status', 'Document', 'Error'].map((h) => el('th', {}, h)))),
-      el('tbody', {}, ops.map((o) => el('tr', { class: o.documentId ? 'click' : '', onclick: () => o.documentId && (location.hash = `#/doc/${o.documentId}`) },
-        el('td', {}, new Date(o.createdAt).toLocaleString('en-IN')), el('td', {}, o.kind), el('td', {}, pill(o.status === 'committed' ? 'ok' : o.status === 'rejected' ? 'error' : 'warning')),
-        el('td', {}, o.documentId ?? ''), el('td', { class: 'muted' }, o.errorMessage ?? '')))))));
-}
+// (HQ health lives in health.js; the older copy that stood here was never routed to.)
 
 // ------------------------------------------------------------------ drafts
 // "Today 11:51 pm" / "08-11-2026 12:25 pm": short enough to scan down a list.
@@ -246,7 +307,12 @@ export async function draftsView(root) {
   root.replaceChildren(el('h1', {}, 'Drafts'), el('p', { class: 'muted' }, 'Bills being prepared. Nothing here is in HQ until saved.'),
     rows.length ? el('div', { class: 'panel' }, el('table', { class: 'grid' }, el('tbody', {}, rows.map((d) => el('tr', { class: 'click', onclick: () => (location.hash = `#/draft/${d.id}`) },
       el('td', {}, d.title), el('td', { class: 'muted' }, when(d.updatedAt)),
-      el('td', { class: 'n' }, el('button', { class: 'btn small danger', onclick: async (e) => { e.stopPropagation(); await del(`/${firmId()}/drafts/${d.id}`); draftsView(root); } }, 'Discard')))))))
+      el('td', { class: 'n' }, el('button', { class: 'btn small danger', onclick: async (e) => {
+        e.stopPropagation();
+        const btn = e.currentTarget;
+        btn.disabled = true; // one discard per click: a double click must not send a second delete
+        try { await del(`/${firmId()}/drafts/${d.id}`); await draftsView(root); } catch (x) { toast(x.message, true); btn.disabled = false; }
+      } }, 'Discard')))))))
       : el('p', {}, 'No drafts. A bill you leave before saving is kept here automatically.'),
     rows.length ? el('p', { class: 'muted' }, '↓ to move, Enter opens. A bill you leave before saving is kept here automatically.') : null);
 }

@@ -17,11 +17,25 @@ public static class ImageNormalizer
     public static byte[] Normalize(byte[] input, int extraRotation = 0, int maxEdge = MaxEdge)
     {
         Guard.Require(input.Length is > 0 and <= (int)MaxInputBytes, "IMAGE_SIZE", "Choose an image up to 25 MB");
-        Image source;
-        try { source = Image.FromStream(new MemoryStream(input), useEmbeddedColorManagement: false, validateImageData: true); }
-        catch (ArgumentException) { throw HqException.Invalid("IMAGE_TYPE", "That file is not a picture this PC can read (use JPEG, PNG or BMP; export PDF/HEIC as images)"); }
+        // GDI+ reports a damaged or oversized picture as OutOfMemoryException (its generic "cannot decode" status) or
+        // ExternalException, not only ArgumentException. Those escaped as a 500 on upload. The header is read first
+        // (validateImageData: false) so a small file claiming huge dimensions is refused before anything is decoded.
+        try { return NormalizeCore(input, extraRotation, maxEdge); }
+        catch (Exception e) when (e is ArgumentException or OutOfMemoryException or System.Runtime.InteropServices.ExternalException)
+        {
+            throw HqException.Invalid("IMAGE_TYPE", "That file is not a picture this PC can read (use JPEG, PNG or BMP; export PDF/HEIC as images)");
+        }
+    }
+
+    /// <summary>Largest picture accepted, in pixels (a 108-megapixel phone camera is about 12000 × 9000).</summary>
+    public const long MaxPixels = 120_000_000;
+
+    private static byte[] NormalizeCore(byte[] input, int extraRotation, int maxEdge)
+    {
+        var source = Image.FromStream(new MemoryStream(input), useEmbeddedColorManagement: false, validateImageData: false);
         using (source)
         {
+            Guard.Require((long)source.Width * source.Height <= MaxPixels, "IMAGE_SIZE", "That picture is too large; send a normal phone photo or scan");
             ApplyExifOrientation(source);
             var rotate = ((extraRotation % 360) + 360) % 360;
             if (rotate == 90) source.RotateFlip(RotateFlipType.Rotate90FlipNone);

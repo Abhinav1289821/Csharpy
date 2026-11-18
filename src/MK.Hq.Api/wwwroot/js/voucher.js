@@ -1,6 +1,13 @@
 // Receipts, payments, credit and debit notes — new, or corrected in place — with bill-wise settlement against open bills.
 import { post, get, opId } from './api.js';
-import { el, money, today, dmy, debounce, toast, modal, lookup } from './util.js';
+import { el, money, today, dmy, debounce, toast, modal, lookup, oneDecimal } from './util.js';
+
+/** Cleans a number input in place (only rewriting it when something changed, so the caret stays put) and returns it. */
+const cleanNumber = (input) => {
+  const v = oneDecimal(input.value);
+  if (v !== input.value) input.value = v;
+  return v;
+};
 import { state, firmId, party, searchParties, loadCatalogue } from './state.js';
 
 const TITLES = {
@@ -19,14 +26,16 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
   // a credit note's party row is a credit, so it settles the party's debits; a debit note's party row settles credits.
   const lineSide = receipt ? 'D' : kind === 'debitNote' ? 'D' : 'C';
   const headerSide = kind === 'creditNote' ? 'D' : 'C';
+  const firm = firmId(); // fixed for this screen: a firm switch must not send this voucher to the other firm
+  let pending = { key: '', id: '' };
   const v = { kind, date: today(), headerAccountId: bankKind || note ? null : 6, notes: '', lines: [], header: { allocations: [], open: [] } };
-  const edit = opts.editId ? await get(`/${firmId()}/vouchers/${opts.editId}`) : null;
+  const edit = opts.editId ? await get(`/${firm}/vouchers/${opts.editId}`) : null;
   let preview = null;
   let busy = false;
 
   const newLine = () => ({ accountId: null, amount: '', notes: '', bank: bankKind ? { method: 2, reference: '', date: today() } : null, allocations: [], open: [] });
   const openItems = async (accountId, side) =>
-    (await get(`/${firmId()}/accounts/${accountId}/open-items${edit ? `?except=${edit.documentId}` : ''}`)).filter((o) => o.side === side);
+    (await get(`/${firm}/accounts/${accountId}/open-items${edit ? `?except=${edit.documentId}` : ''}`)).filter((o) => o.side === side);
 
   if (edit) {
     const r = edit.voucher;
@@ -35,7 +44,10 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
       const p = party(l.accountId);
       v.lines.push({
         accountId: l.accountId, amount: String(l.amount), notes: l.notes ?? '',
-        bank: l.bank ? { method: l.bank.method, reference: l.bank.reference ?? '', date: l.bank.date ?? '' } : null,
+        // Keep every bank detail HQ stored (bank name, place, deposit date have no box here): a correction sends them back
+        // unchanged instead of blanking them in HQ.
+        bank: l.bank ? { method: l.bank.method, reference: l.bank.reference ?? '', date: l.bank.date ?? '',
+          bank: l.bank.bank ?? null, place: l.bank.place ?? null, depositDate: l.bank.depositDate ?? null } : null,
         allocations: (l.allocations ?? []).map((a) => ({ entryId: a.entryId, amount: String(a.amount) })),
         open: p?.billWise && !note ? await openItems(l.accountId, lineSide) : [],
       });
@@ -51,7 +63,8 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
     kind: v.kind, date: v.date, headerAccountId: v.headerAccountId, notes: v.notes || undefined,
     lines: v.lines.filter((l) => l.accountId && Number(l.amount) > 0).map((l) => ({
       accountId: l.accountId, amount: String(l.amount), notes: l.notes || undefined,
-      bank: l.bank ? { method: Number(l.bank.method), reference: l.bank.reference || undefined, date: l.bank.date || undefined } : undefined,
+      bank: l.bank ? { method: Number(l.bank.method), reference: l.bank.reference || undefined, date: l.bank.date || undefined,
+        bank: l.bank.bank || undefined, place: l.bank.place || undefined, depositDate: l.bank.depositDate || undefined } : undefined,
       allocations: allocs(l.allocations),
     })),
     headerAllocations: note ? allocs(v.header.allocations) : undefined,
@@ -60,17 +73,22 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
 
   const status = el('div', { class: 'stack' });
   const ledger = el('div');
+  let seq = 0; // only the newest preview may land: typing 1000 must not end with the answer for "1" on screen
   async function refresh() {
     const req = request();
+    const mine = ++seq;
     if (!req.headerAccountId || !req.lines.length) { preview = null; status.replaceChildren(); ledger.replaceChildren(); return; }
     try {
-      preview = await post(edit ? `/${firmId()}/vouchers/${edit.documentId}/amend/preview` : `/${firmId()}/vouchers/preview`, req);
+      const p = await post(edit ? `/${firm}/vouchers/${edit.documentId}/amend/preview` : `/${firm}/vouchers/preview`, req);
+      if (mine !== seq) return;
+      preview = p;
       status.replaceChildren(...preview.warnings.map((w) => el('div', { class: 'issue warn' }, w)),
         el('div', { class: 'grand', 'data-label': note ? 'Note total' : receipt ? 'Received' : 'Paid' }, '₹ ' + money(preview.total)),
         el('div', { class: 'muted' }, edit ? `${edit.reference} (corrected in place)` : `${preview.series}/${preview.nextNumberHint} (next)`));
       ledger.replaceChildren(el('details', {}, el('summary', {}, 'HQ ledger entries'), el('table', { class: 'grid' }, el('tbody', {},
         preview.ledger.map((r) => el('tr', {}, el('td', {}, r.accountName), el('td', {}, r.type), el('td', { class: 'n' }, money(r.amount))))))));
     } catch (e) {
+      if (mine !== seq) return;
       preview = null;
       status.replaceChildren(el('div', { class: 'issue err' }, e.message));
       ledger.replaceChildren();
@@ -96,7 +114,7 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
           let a = holder.allocations.find((x) => x.entryId === o.entryId);
           if (!a) { a = { entryId: o.entryId, amount: '' }; holder.allocations.push(a); }
           const x = el('input', { class: 'num', value: a.amount, style: { width: '110px' } });
-          x.addEventListener('input', () => { a.amount = x.value.replace(/[^0-9.]/g, ''); schedule(); });
+          x.addEventListener('input', () => { a.amount = cleanNumber(x); schedule(); });
           return el('tr', {}, el('td', {}, o.reference), el('td', {}, dmy(o.date)), el('td', { class: 'n' }, o.ageDays), el('td', { class: 'n' }, money(o.amount)), el('td', { class: 'n' }, money(o.open)), el('td', { class: 'n' }, x));
         }))));
   }
@@ -118,7 +136,13 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
       onPick: async (x) => {
         v.headerAccountId = x.accountId;
         v.header.allocations = [];
-        v.header.open = x.billWise ? await openItems(x.accountId, headerSide) : [];
+        v.header.open = [];
+        try {
+          const open = x.billWise ? await openItems(x.accountId, headerSide) : [];
+          // Picked another party while this one's bills were loading: its bills must not be offered for the other.
+          if (v.headerAccountId !== x.accountId) return;
+          v.header.open = open;
+        } catch (e) { toast(`Could not load the open bills: ${e.message}`, true); }
         render();
         schedule();
       },
@@ -139,7 +163,15 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
       onPick: async (x) => {
         l.accountId = x.accountId;
         l.allocations = [];
-        l.open = x.billWise && !note ? await openItems(x.accountId, lineSide) : [];
+        l.open = [];
+        try {
+          const open = x.billWise && !note ? await openItems(x.accountId, lineSide) : [];
+          // Picked another account on this line meanwhile (or the line was removed): drop the stale bills.
+          if (l.accountId !== x.accountId || !v.lines.includes(l)) return;
+          l.open = open;
+        } catch (e) { toast(`Could not load the open bills: ${e.message}`, true); }
+        if (!v.lines.includes(l)) return;
+        i = v.lines.indexOf(l); // lines above may have been removed while the bills loaded
         render();
         linesBox.children[i]?.querySelector('input.amount')?.focus();
         schedule();
@@ -147,7 +179,7 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
       autofocus: !note && i === 0 && !l.accountId,
     });
     const amount = el('input', { class: 'num amount', value: l.amount, inputmode: 'decimal', placeholder: '0.00' });
-    amount.addEventListener('input', () => { l.amount = amount.value.replace(/[^0-9.]/g, ''); schedule(); });
+    amount.addEventListener('input', () => { l.amount = cleanNumber(amount); schedule(); });
     // Enter after the amount: settle the oldest bills first (if nothing is settled by hand yet), then the note.
     amount.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter') return;
@@ -175,15 +207,26 @@ export async function voucherView(root, kind = 'cashReceipt', opts = {}) {
       settleTable(l, () => Number(l.amount) || 0));
   }
 
+  // Why F10 cannot save yet, in the counter's words: it used to do nothing at all (e.g. a bank voucher with no bank).
+  const notReady = () => {
+    if (!v.headerAccountId) return bankKind ? 'Choose the bank first' : 'Choose the party first';
+    if (!request().lines.length) return note ? 'Choose the account and enter the amount' : `Enter who ${receipt ? 'paid' : 'was paid'} and the amount`;
+    return status.querySelector('.issue.err')?.textContent || 'This voucher cannot be saved yet';
+  };
+
   async function save() {
     if (busy) return;
     busy = true;
     try {
       await refresh();
-      if (!preview) return;
+      if (!preview) { toast(notReady(), true); return; }
+      // Same id when the same reviewed voucher is sent again (after a lost response), so it can never be saved twice.
+      const body = { expectedHash: preview.hash, voucher: request() };
+      const key = JSON.stringify(body);
+      if (pending.key !== key) pending = { key, id: opId() };
       const r = edit
-        ? await post(`/${firmId()}/vouchers/${edit.documentId}/amend`, { operationId: opId(), expectedHash: preview.hash, voucher: request() })
-        : await post(`/${firmId()}/vouchers`, { operationId: opId(), expectedHash: preview.hash, voucher: request() });
+        ? await post(`/${firm}/vouchers/${edit.documentId}/amend`, { operationId: pending.id, ...body })
+        : await post(`/${firm}/vouchers`, { operationId: pending.id, ...body });
       loadCatalogue().catch(() => {});
       await modal((close) => [el('h1', {}, `${edit ? 'Corrected' : 'Saved'} ${r.reference}`),
         el('div', { class: 'saved-amount' }, el('span', {}, note ? TITLES[kind] : receipt ? 'Received' : 'Paid'), el('strong', {}, '₹ ' + money(r.total))), el('p', { class: 'muted' }, 'Now in HQ.'),

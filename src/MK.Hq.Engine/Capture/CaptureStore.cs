@@ -89,9 +89,12 @@ public sealed class CaptureStore
     public int AddPage(string id, byte[] original, byte[] normalized)
     {
         using var cn = Open();
-        var page = cn.ExecuteScalar<int>("SELECT COALESCE(MAX(page),0)+1 FROM pages WHERE capture_id=@id", new { id });
+        // MAX+1 and the insert in one (immediate) transaction: two pages uploaded at once must not pick the same number.
+        using var tx = cn.BeginTransaction();
+        var page = cn.ExecuteScalar<int>("SELECT COALESCE(MAX(page),0)+1 FROM pages WHERE capture_id=@id", new { id }, tx);
         Guard.Require(page <= 10, "CAPTURE_PAGES", "A bill can have at most 10 pages");
-        cn.Execute("INSERT INTO pages(capture_id,page,image,original) VALUES(@id,@page,@normalized,@original)", new { id, page, normalized, original });
+        cn.Execute("INSERT INTO pages(capture_id,page,image,original) VALUES(@id,@page,@normalized,@original)", new { id, page, normalized, original }, tx);
+        tx.Commit();
         return page;
     }
 
@@ -144,10 +147,12 @@ public sealed class CaptureStore
         return cn.Query<CaptureRecord>($"SELECT {Columns} FROM captures c WHERE c.firm=@firm AND c.status<>'discarded' ORDER BY c.created_at DESC LIMIT @take", new { firm, take }).ToList();
     }
 
+    /// <summary>Captures to read at start-up. A read interrupted by a restart goes back to "received" so it can be claimed again.</summary>
     public IReadOnlyList<string> Pending()
     {
         using var cn = Open();
-        return cn.Query<string>("SELECT id FROM captures WHERE status IN ('received','extracting') ORDER BY created_at").ToList();
+        cn.Execute("UPDATE captures SET status='received' WHERE status='extracting'");
+        return cn.Query<string>("SELECT id FROM captures WHERE status='received' ORDER BY created_at").ToList();
     }
 
     public string? Extraction(string id)
@@ -156,15 +161,19 @@ public sealed class CaptureStore
         return cn.ExecuteScalar<string?>("SELECT extraction FROM captures WHERE id=@id", new { id });
     }
 
-    public void Update(string id, string status, string? model = null, string? extraction = null, string? draftId = null, string? summary = null,
-        string? errorCode = null, string? errorMessage = null, long? documentId = null, string? reference = null, bool countAttempt = false, long? elapsedMs = null)
+    /// <summary>Sets the status (and any given fields). With <paramref name="onlyFrom"/>, only if the capture is still in that
+    /// status; returns whether the row changed, so state changes are compare-and-set rather than check-then-act.</summary>
+    public bool Update(string id, string status, string? model = null, string? extraction = null, string? draftId = null, string? summary = null,
+        string? errorCode = null, string? errorMessage = null, long? documentId = null, string? reference = null, bool countAttempt = false, long? elapsedMs = null,
+        string? onlyFrom = null)
     {
         using var cn = Open();
-        cn.Execute("""
+        return cn.Execute("""
             UPDATE captures SET status=@status, model=COALESCE(@model,model), extraction=COALESCE(@extraction,extraction), draft_id=COALESCE(@draftId,draft_id),
               summary=COALESCE(@summary,summary), error_code=@errorCode, error_message=@errorMessage, document_id=COALESCE(@documentId,document_id),
-              reference=COALESCE(@reference,reference), attempts=attempts+@attempt, elapsed_ms=COALESCE(@elapsedMs,elapsed_ms), updated_at=@now WHERE id=@id
-            """, new { id, status, model, extraction, draftId, summary, errorCode, errorMessage, documentId, reference, attempt = countAttempt ? 1 : 0, elapsedMs, now = Now() });
+              reference=COALESCE(@reference,reference), attempts=attempts+@attempt, elapsed_ms=COALESCE(@elapsedMs,elapsed_ms), updated_at=@now
+            WHERE id=@id AND (@onlyFrom IS NULL OR status=@onlyFrom)
+            """, new { id, status, model, extraction, draftId, summary, errorCode, errorMessage, documentId, reference, attempt = countAttempt ? 1 : 0, elapsedMs, now = Now(), onlyFrom }) == 1;
     }
 
     public IReadOnlyDictionary<string, (long ItemId, long UnitId)> Aliases(string firm)

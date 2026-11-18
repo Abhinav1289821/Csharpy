@@ -22,25 +22,38 @@ public static class AgentEndpoints
             var header = ctx.Request.Headers.Authorization.ToString();
             if (!header.StartsWith("Bearer ", StringComparison.Ordinal) || hub.ChatByKey(header[7..]) is not { } chat)
                 return Results.Json(new { jsonrpc = "2.0", id = (object?)null, error = new { code = -32001, message = "Unknown or closed MK assistant chat" } }, statusCode: 401);
-            var msg = await JsonNode.ParseAsync(ctx.Request.Body, cancellationToken: ct) as JsonObject;
-            if (msg is null) return Results.BadRequest();
-            var method = msg["method"]?.GetValue<string>() ?? "";
+            // Malformed messages get JSON-RPC errors (not the app's {code, message} 400/500), which the MCP client can show.
+            JsonObject? msg;
+            try { msg = await JsonNode.ParseAsync(ctx.Request.Body, cancellationToken: ct) as JsonObject; }
+            catch (JsonException) { return RpcError(null, -32700, "Parse error"); }
+            if (msg is null) return RpcError(null, -32600, "Expected one JSON-RPC request object");
+            var method = Text(msg["method"]) ?? "";
             if (!msg.TryGetPropertyValue("id", out var id) || id is null) return Results.Accepted(); // notification
-            JsonNode? result = method switch
+            var parameters = msg["params"] as JsonObject;
+            JsonNode? result;
+            switch (method)
             {
-                "initialize" => new JsonObject
-                {
-                    ["protocolVersion"] = msg["params"]?["protocolVersion"]?.GetValue<string>() ?? "2025-06-18",
-                    ["capabilities"] = new JsonObject { ["tools"] = new JsonObject { ["listChanged"] = false } },
-                    ["serverInfo"] = new JsonObject { ["name"] = AgentTools.ServerName, ["title"] = "MK Billing", ["version"] = typeof(AgentTools).Assembly.GetName().Version?.ToString() ?? "1" },
-                    ["instructions"] = "MK Billing: read HQ accounts, prepare bill drafts, and move the user's screen. Nothing here saves to HQ.",
-                },
-                "tools/list" => new JsonObject { ["tools"] = tools.List() },
-                "tools/call" => await tools.CallAsync(chat, msg["params"]?["name"]?.GetValue<string>() ?? "",
-                    msg["params"]?["arguments"] as JsonObject ?? new JsonObject(), ct),
-                // Anything else (ping, newer discovery calls): an empty result, which clients read as "nothing special here".
-                _ => new JsonObject(),
-            };
+                case "initialize":
+                    result = new JsonObject
+                    {
+                        ["protocolVersion"] = Text(parameters?["protocolVersion"]) ?? "2025-06-18",
+                        ["capabilities"] = new JsonObject { ["tools"] = new JsonObject { ["listChanged"] = false } },
+                        ["serverInfo"] = new JsonObject { ["name"] = AgentTools.ServerName, ["title"] = "MK Billing", ["version"] = typeof(AgentTools).Assembly.GetName().Version?.ToString() ?? "1" },
+                        ["instructions"] = "MK Billing: read HQ accounts, prepare bill drafts, and move the user's screen. Nothing here saves to HQ.",
+                    };
+                    break;
+                case "tools/list":
+                    result = new JsonObject { ["tools"] = tools.List() };
+                    break;
+                case "tools/call":
+                    if (Text(parameters?["name"]) is not { } tool) return RpcError(id, -32602, "tools/call needs params.name");
+                    result = await tools.CallAsync(chat, tool, parameters!["arguments"] as JsonObject ?? new JsonObject(), ct);
+                    break;
+                default:
+                    // Anything else (ping, newer discovery calls): an empty result, which clients read as "nothing special here".
+                    result = new JsonObject();
+                    break;
+            }
             return Results.Json(new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id.DeepClone(), ["result"] = result });
         });
         app.MapGet("/mcp", () => Results.StatusCode(405));
@@ -119,6 +132,11 @@ public static class AgentEndpoints
             finally { chat.Unsubscribe(live); }
         });
     }
+
+    private static string? Text(JsonNode? n) => n is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+
+    private static IResult RpcError(JsonNode? id, int code, string message) =>
+        Results.Json(new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id?.DeepClone(), ["error"] = new JsonObject { ["code"] = code, ["message"] = message } });
 
     private static IResult Gone() => Results.Json(new { code = "AGENT_CHAT_GONE", message = "This conversation has ended. Start a new one.", kind = "NotFound" }, statusCode: 404);
 

@@ -12,11 +12,13 @@ public static class AmountInWords
 
     public static string Rupees(decimal amount)
     {
+        // A negative amount must not print as if it were owed the other way; "Minus" keeps the printed words honest.
+        var sign = Money.Round2(amount) < 0 ? "Minus " : "";
         amount = Money.Round2(Math.Abs(amount));
         var rupees = (long)decimal.Truncate(amount);
         var paise = (int)((amount - rupees) * 100);
         var words = rupees == 0 ? "Zero" : Words(rupees);
-        return paise > 0 ? $"Rupees {words} and {Words(paise)} Paise Only" : $"Rupees {words} Only";
+        return paise > 0 ? $"{sign}Rupees {words} and {Words(paise)} Paise Only" : $"{sign}Rupees {words} Only";
     }
 
     private static string Words(long n)

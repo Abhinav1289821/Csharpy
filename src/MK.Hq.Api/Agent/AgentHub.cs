@@ -93,7 +93,9 @@ public sealed class AgentChat
 /// session per conversation and hands each session MK's tools as an HTTP MCP server. The agent never gets file or
 /// terminal access from us, and it cannot save to HQ: bills it prepares are drafts the user reviews and saves.
 /// </summary>
-public sealed class AgentHub : IAsyncDisposable
+public enum PermissionDecision { Ask, Allow, Refuse }
+
+public sealed partial class AgentHub : IAsyncDisposable
 {
     private static readonly HashSet<string> RefusedKinds = ["execute", "edit", "delete", "move"];
     private readonly AgentOptions _options;
@@ -107,6 +109,9 @@ public sealed class AgentHub : IAsyncDisposable
     private AcpConnection? _acp;
     private string? _lastError;
     private bool _signInNeeded;
+    /// <summary>The agent process that reported "sign in needed". Only that process is restarted to pick up a new sign-in;
+    /// a second caller must not kill the fresh process the first caller just started.</summary>
+    private AcpConnection? _authFailedOn;
 
     public AgentHub(AgentOptions options, MK.Hq.Engine.Configuration.HqOptions hq, ILogger<AgentHub> log)
     {
@@ -148,12 +153,18 @@ public sealed class AgentHub : IAsyncDisposable
 
     private async Task<AcpConnection> ConnectionAsync(CancellationToken ct)
     {
-        if (_acp is { Alive: true } live) return live;
+        if (_acp is { Alive: true } live && !ReferenceEquals(live, _authFailedOn)) return live;
         await _start.WaitAsync(ct);
         try
         {
-            if (_acp is { Alive: true } again) return again;
-            if (_acp is not null) await _acp.DisposeAsync();
+            // A sign-in made since the last attempt is only picked up by a fresh agent process.
+            if (_acp is { Alive: true } again && !ReferenceEquals(again, _authFailedOn)) return again;
+            if (_acp is not null)
+            {
+                var old = _acp;
+                _acp = null; // never leave a disposed connection behind: if the restart below fails, the next call retries it
+                await old.DisposeAsync();
+            }
             var agy = _options.ResolveAgy();
             if (!File.Exists(agy)) throw new AcpException(-2, $"The Antigravity CLI is not installed on this PC ({agy}). Install it with: irm https://antigravity.google/cli/install.ps1 | iex");
             var acp = await AcpConnection.StartAsync(agy, new[] { "acp" }.Concat(_options.Arguments), _workspace, _log, ct);
@@ -188,8 +199,6 @@ public sealed class AgentHub : IAsyncDisposable
 
     public async Task<AgentChat> NewChatAsync(ScreenContext screen, CancellationToken ct)
     {
-        // A sign-in made since the last attempt is only picked up by a fresh agent process.
-        if (_signInNeeded && _acp is not null) { await _acp.DisposeAsync(); _acp = null; }
         var acp = await ConnectionAsync(ct);
         var key = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
         JsonObject Params(bool meta)
@@ -222,11 +231,12 @@ public sealed class AgentHub : IAsyncDisposable
                 result = await acp.RequestAsync("session/new", Params(meta: false), TimeSpan.FromSeconds(90), ct);
                 needsInstructions = true;
             }
+            chat.SessionId = result?["sessionId"]?.GetValue<string>() ?? throw new AcpException(-1, "The agent did not open a session");
         }
         catch (AcpException e)
         {
             _chats.TryRemove(chat.Id, out _);
-            if (e.AuthRequired) _signInNeeded = true;
+            if (e.AuthRequired) { _signInNeeded = true; _authFailedOn = acp; }
             throw;
         }
         catch
@@ -235,7 +245,6 @@ public sealed class AgentHub : IAsyncDisposable
             throw;
         }
         _signInNeeded = false;
-        chat.SessionId = result?["sessionId"]?.GetValue<string>() ?? throw new AcpException(-1, "The agent did not open a session");
         chat.NeedsInstructions = needsInstructions;
         chat.Push(new JsonObject
         {
@@ -263,7 +272,6 @@ public sealed class AgentHub : IAsyncDisposable
     /// </summary>
     public async Task<(string Text, string? Model)> AskAsync(string prompt, IReadOnlyList<byte[]> jpegs, TimeSpan timeout, CancellationToken ct)
     {
-        if (_signInNeeded && _acp is not null) { await _acp.DisposeAsync(); _acp = null; }
         var acp = await ConnectionAsync(ct);
         JsonNode? opened;
         try
@@ -271,7 +279,7 @@ public sealed class AgentHub : IAsyncDisposable
             opened = await acp.RequestAsync("session/new", new JsonObject { ["cwd"] = Path.GetFullPath(_readerWorkspace), ["mcpServers"] = new JsonArray() },
                 TimeSpan.FromSeconds(90), ct);
         }
-        catch (AcpException e) when (e.AuthRequired) { _signInNeeded = true; throw; }
+        catch (AcpException e) when (e.AuthRequired) { _signInNeeded = true; _authFailedOn = acp; throw; }
         _signInNeeded = false;
         var sessionId = opened?["sessionId"]?.GetValue<string>() ?? throw new AcpException(-1, "The agent did not open a session");
         var reply = new System.Text.StringBuilder();
@@ -357,7 +365,13 @@ public sealed class AgentHub : IAsyncDisposable
     public async Task CancelAsync(AgentChat chat)
     {
         foreach (var p in chat.Permissions.Values) p.TrySetResult(null);
-        if (_acp is { Alive: true } acp) await acp.NotifyAsync("session/cancel", new JsonObject { ["sessionId"] = chat.SessionId });
+        // Best effort: the agent may die between the Alive check and the write. A failed cancel must not turn the Stop
+        // button into a server error, nor stop CloseAsync from forgetting the chat (and its MCP key).
+        if (_acp is { Alive: true } acp)
+        {
+            try { await acp.NotifyAsync("session/cancel", new JsonObject { ["sessionId"] = chat.SessionId }); }
+            catch (Exception e) { _log.LogDebug(e, "session/cancel"); }
+        }
     }
 
     public bool Answer(AgentChat chat, string permissionId, string? optionId) =>
@@ -420,18 +434,17 @@ public sealed class AgentHub : IAsyncDisposable
         var chat = BySession(parameters) ?? throw new AcpException(-32602, "Unknown session");
         var call = parameters?["toolCall"];
         var callId = call?["toolCallId"]?.GetValue<string>() ?? "";
-        var title = call?["title"]?.GetValue<string>() ?? (chat.ToolTitles.TryGetValue(callId, out var t) ? t : "an action");
-        var kind = call?["kind"]?.GetValue<string>() ?? "other";
+        var title = (call?["title"] as JsonValue)?.GetValueKind() == System.Text.Json.JsonValueKind.String ? call!["title"]!.GetValue<string>()
+            : chat.ToolTitles.TryGetValue(callId, out var t) ? t : "an action";
+        var kind = (call?["kind"] as JsonValue)?.GetValueKind() == System.Text.Json.JsonValueKind.String ? call!["kind"]!.GetValue<string>() : null;
 
-        // MK's own tools only read, prepare drafts or move the screen: they run without asking.
-        var text = title + " " + call?["rawInput"]?.ToJsonString();
-        if (AgentTools.Names.Any(n => text.Contains(n, StringComparison.Ordinal)))
-            return Selected(Pick("allow_once", "allow_always"));
-        // Commands and file changes on the shop PC are never allowed.
-        if (RefusedKinds.Contains(kind))
+        switch (DecidePermission(kind, title))
         {
-            chat.Push(new JsonObject { ["type"] = "notice", ["text"] = $"Blocked: the assistant tried to {title}. It may only use MK's tools." });
-            return Selected(Pick("reject_once", "reject_always"));
+            case PermissionDecision.Refuse:
+                chat.Push(new JsonObject { ["type"] = "notice", ["text"] = $"Blocked: the assistant tried to {title}. It may only use MK's tools." });
+                return Selected(Pick("reject_once", "reject_always"));
+            case PermissionDecision.Allow:
+                return Selected(Pick("allow_once", "allow_always"));
         }
         // Anything else (for example reading a web page) is the user's call.
         var permissionId = Guid.NewGuid().ToString("N")[..10];
@@ -457,6 +470,30 @@ public sealed class AgentHub : IAsyncDisposable
             chat.Push(new JsonObject { ["type"] = "permission-closed", ["id"] = permissionId });
         }
     }
+
+    /// <summary>
+    /// What to do with an agent's permission request. Commands and file changes on the shop PC are never allowed, checked
+    /// first so that a command line that merely mentions an MK tool ("echo stock &amp;&amp; del ...") is not waved through.
+    /// MK's own tools only read, prepare drafts or move the screen: they run without asking. Antigravity titles them by
+    /// their MCP name ("Run mcp_mk_find_items"), so the title must START with an MK tool name; the name appearing
+    /// anywhere else (a URL or file path such as ".../stock.txt", the tool's arguments) proves nothing. Anything else
+    /// (for example reading a web page) is the user's call.
+    /// </summary>
+    public static PermissionDecision DecidePermission(string? kind, string? title)
+    {
+        var k = (kind ?? "other").Trim().ToLowerInvariant();
+        if (RefusedKinds.Contains(k)) return PermissionDecision.Refuse;
+        var m = McpTitle().Match(title ?? "");
+        // A bare name ("stock") without the mcp_mk_ prefix only counts for an ordinary tool call, never a file read,
+        // search or web fetch that happens to be titled like one.
+        if (m.Success && AgentTools.Names.Contains(m.Groups["name"].Value.ToLowerInvariant()) && (m.Groups["prefix"].Success || k is "other" or "think"))
+            return PermissionDecision.Allow;
+        return PermissionDecision.Ask;
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^\s*(?:run\s+)?(?<prefix>mcp_mk_|mcp__mk__)?(?<name>[a-z_]+)(?:$|[\s(:])",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
+    private static partial System.Text.RegularExpressions.Regex McpTitle();
 
     public async ValueTask DisposeAsync()
     {

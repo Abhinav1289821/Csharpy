@@ -73,7 +73,8 @@ public static class VoucherLedger
             {
                 VoucherKind.CreditNote => 'C',
                 VoucherKind.DebitNote => 'D',
-                _ => spec.IsBank && spec.IsReceipt ? 'D' : 'C',
+                // HQ's aType2 depends on receipt/payment only, not on the mode: a receipt's header is always debited.
+                _ => spec.IsReceipt ? 'D' : 'C',
             };
             rows.Add(new VoucherLedgerRow(header.Id, type, lines[0].AccountId, headerTotal, lines[0].Notes, -1));
         }

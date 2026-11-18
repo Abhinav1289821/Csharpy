@@ -1,13 +1,19 @@
 // Item and account masters: created and changed exactly as HQ's own Items and Accounts screens do.
 import { get, post, opId } from './api.js';
-import { el, money, debounce, toast, rank } from './util.js';
-import { state, firmId, loadCatalogue } from './state.js';
+import { el, money, debounce, toast, rank, oneDecimal } from './util.js';
+import { state, firmId, loadCatalogue, ITEM_FIELDS, PARTY_FIELDS } from './state.js';
 
 const field = (label, input, hint) => el('label', { class: 'field' }, el('span', {}, label), input, hint ? el('small', { class: 'muted' }, hint) : null);
 
 function bind(input, obj, key, onChange, transform = (x) => x) {
   input.value = obj[key] ?? '';
-  input.addEventListener('input', () => { obj[key] = transform(input.value); onChange(); });
+  input.addEventListener('input', () => {
+    const v = transform(input.value);
+    // Show what is kept: a rate typed "1..5" or "12a" is stored cleaned, so the box must not keep showing the raw text.
+    if (typeof v === 'string' && v !== input.value) input.value = v;
+    obj[key] = v;
+    onChange();
+  });
   return input;
 }
 
@@ -15,12 +21,18 @@ function bind(input, obj, key, onChange, transform = (x) => x) {
 function masterForm({ previewUrl, saveUrl, request, wrap, render, onSaved, title }) {
   let preview = null;
   let busy = false;
+  let seq = 0; // only the newest preview may land: an older, slower answer must not overwrite it
+  let pending = { key: '', id: '' };
   const status = el('div', { class: 'stack' });
   const refresh = async () => {
+    const mine = ++seq;
     try {
-      preview = await post(previewUrl, request());
+      const p = await post(previewUrl, request());
+      if (mine !== seq) return;
+      preview = p;
       status.replaceChildren(...render(preview), ...preview.warnings.map((w) => el('div', { class: 'issue warn' }, w)));
     } catch (e) {
+      if (mine !== seq) return;
       preview = null;
       status.replaceChildren(el('div', { class: 'issue err' }, e.message));
     }
@@ -31,8 +43,13 @@ function masterForm({ previewUrl, saveUrl, request, wrap, render, onSaved, title
     busy = true;
     try {
       await refresh();
-      if (!preview) return;
-      const r = await post(saveUrl, { operationId: opId(), expectedHash: preview.hash, ...wrap(request()) });
+      // F10 on a form HQ would refuse (a blank name, a GSTIN that does not check out) says why, not nothing.
+      if (!preview) { toast(status.querySelector('.issue.err')?.textContent || 'Not ready to save: check the form', true); return; }
+      // Same id when the same reviewed form is sent again after a lost response: never two new items/accounts.
+      const body = { expectedHash: preview.hash, ...wrap(request()) };
+      const key = JSON.stringify(body);
+      if (pending.key !== key) pending = { key, id: opId() };
+      const r = await post(saveUrl, { operationId: pending.id, ...body });
       await loadCatalogue().catch(() => {});
       toast(`${title(r)} saved in HQ`);
       onSaved(r);
@@ -52,7 +69,7 @@ export async function itemsView(root) {
   const items = [...new Map(state.catalogue.items.map((i) => [i.itemId, i])).values()];
   const out = el('div');
   const show = (text) => {
-    const rows = text ? rank(items, text, (i) => [i.name, i.code, i.group, i.hsn], 200) : items.slice(0, 200);
+    const rows = text ? rank(items, text, ITEM_FIELDS, 200) : items.slice(0, 200);
     out.replaceChildren(el('div', { class: 'panel scroll' }, el('table', { class: 'grid' },
       el('thead', {}, el('tr', {}, ['Item', 'Code', 'Group', 'HSN', 'GST %', 'Purchase', 'Sale', 'Stock'].map((h, i) => el('th', { class: i >= 4 ? 'n' : '' }, h)))),
       el('tbody', {}, rows.map((i) => el('tr', { class: 'click', onclick: () => (location.hash = `#/items/${i.itemId}`) },
@@ -94,7 +111,7 @@ export async function itemForm(root, id) {
   rates.addEventListener('change', () => { it.gstRate = rates.value; s(); });
   const active = el('input', { type: 'checkbox', checked: it.active });
   active.addEventListener('change', () => { it.active = active.checked; s(); });
-  const decimal = (v) => v.replace(/[^0-9.]/g, '');
+  const decimal = (v) => oneDecimal(v);
   root.replaceChildren(
     el('div', { class: 'row spread' }, el('h1', {}, id ? `Item: ${it.name}` : 'New item'),
       el('div', { class: 'row' }, el('a', { class: 'btn small', href: '#/items' }, 'All items'), el('button', { class: 'btn primary', onclick: f.save }, 'Save to HQ (F10)'))),
@@ -125,7 +142,7 @@ export async function accountsView(root, filter = 'all') {
   const parties = state.catalogue.parties.filter((p) => ['Customer', 'Supplier', 'Customer-Supplier'].includes(p.type) && (filter === 'all' || p.type === filter));
   const out = el('div');
   const show = (text) => {
-    const rows = text ? rank(parties, text, (p) => [p.name, p.town, p.mobile, p.gstin, p.code], 200) : parties.slice(0, 200);
+    const rows = text ? rank(parties, text, PARTY_FIELDS, 200) : parties.slice(0, 200);
     out.replaceChildren(el('div', { class: 'panel scroll' }, el('table', { class: 'grid' },
       el('thead', {}, el('tr', {}, ['Name', 'Type', 'Town', 'Mobile', 'GSTIN', 'Balance'].map((h, i) => el('th', { class: i === 5 ? 'n' : '' }, h)))),
       el('tbody', {}, rows.map((p) => el('tr', { class: 'click', onclick: () => (location.hash = `#/accounts/${p.accountId}`) },
@@ -188,7 +205,7 @@ export async function accountForm(root, id, type = 'Customer') {
         el('div', { class: 'row' }, field('Town', text('town', 25)), field('District', text('district', 25)), field('PIN', text('pin', 10, { inputmode: 'numeric' }))),
         el('div', { class: 'row' }, field('Mobile', text('mobile', 12, { inputmode: 'tel' })), field('Phone', text('phone', 30)), field('Email', text('email', 60)), field('Contact person', text('person', 50))),
         el('div', { class: 'row' }, field('GST registration', gstType), field('GSTIN', gstin), field('State', statePick, 'From the GSTIN when registered'), field('PAN', text('pan', 10))),
-        el('div', { class: 'row' }, field('Opening balance (1-Apr)', bind(el('input', { class: 'num', inputmode: 'decimal' }), a, 'openingBalance', s, (v) => v.replace(/[^0-9.]/g, ''))), field('Side', side)),
+        el('div', { class: 'row' }, field('Opening balance (1-Apr)', bind(el('input', { class: 'num', inputmode: 'decimal' }), a, 'openingBalance', s, oneDecimal)), field('Side', side)),
         check('billWise', 'Bill-wise: settle receipts and payments against individual bills'),
         check('active', 'Active')),
       el('div', { class: 'panel totals stack' }, f.status)));

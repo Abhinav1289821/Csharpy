@@ -54,13 +54,25 @@ public sealed partial class HqFirm
         Guard.Require(date >= PeriodStart && date <= PeriodEnd, "DATE_OUTSIDE_PERIOD",
             $"{date:dd-MM-yyyy} is outside {Name}'s financial year {PeriodStart:dd-MM-yyyy} to {PeriodEnd:dd-MM-yyyy}");
 
-    private static (DateOnly, DateOnly) Period(FirmOptions firm)
+    /// <summary>The firm's financial year: as configured, else from the database name (ISTMBM26 → 1 Apr 2026 to 31 Mar 2027).
+    /// Only one end configured gives the other a year away; before, a lone PeriodStart was silently replaced by the name's
+    /// year (or refused for a name without one), and a start after the end let no date pass RequireInPeriod.</summary>
+    public static (DateOnly Start, DateOnly End) Period(FirmOptions firm)
     {
-        if (firm.PeriodStart is { } s && firm.PeriodEnd is { } e) return (s, e);
-        var m = YearSuffix().Match(firm.Database);
-        Guard.Require(m.Success, "INVALID_CONFIGURATION", $"Set PeriodStart/PeriodEnd for {firm.Database}");
-        var year = 2000 + int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-        return (new DateOnly(year, 4, 1), new DateOnly(year + 1, 3, 31));
+        (DateOnly, DateOnly) period;
+        if (firm.PeriodStart is { } s && firm.PeriodEnd is { } e) period = (s, e);
+        else if (firm.PeriodStart is { } start) period = (start, start.AddYears(1).AddDays(-1));
+        else if (firm.PeriodEnd is { } end) period = (end.AddYears(-1).AddDays(1), end);
+        else
+        {
+            var m = YearSuffix().Match(firm.Database);
+            Guard.Require(m.Success, "INVALID_CONFIGURATION", $"Set PeriodStart/PeriodEnd for {firm.Database}");
+            var year = 2000 + int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+            period = (new DateOnly(year, 4, 1), new DateOnly(year + 1, 3, 31));
+        }
+        Guard.Require(period.Item1 <= period.Item2, "INVALID_CONFIGURATION",
+            $"{firm.Database}: the financial year starts {period.Item1:dd-MM-yyyy}, after its end {period.Item2:dd-MM-yyyy}");
+        return period;
     }
 
     [GeneratedRegex("^[a-z][a-z0-9-]{0,15}$")] private static partial Regex IdShape();

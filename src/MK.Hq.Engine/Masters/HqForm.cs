@@ -46,7 +46,8 @@ public static class HqForm
         Guard.Require(v.Length <= max, "MASTER_FIELD_TOO_LONG", $"The {field} can be at most {max} characters");
         Guard.Require(v.All(c => (apostrophe || c != '\'') && ((c >= ' ' && c <= '~') || (c >= '\u00A0' && c <= '\u00FF'))), "MASTER_FIELD_CHARACTERS",
             $"The {field} can only use English letters, digits and common punctuation{(apostrophe ? "" : " (no apostrophe)")} - HQ would store anything else as '?'");
-        Guard.Require(!v.StartsWith(' '), "MASTER_FIELD_CHARACTERS", $"The {field} cannot start with a space");
+        // A box left as spaces is a blank box (every caller turns it into HQ's " " or ""), not a value that starts with one.
+        Guard.Require(!v.StartsWith(' ') || v.Trim().Length == 0, "MASTER_FIELD_CHARACTERS", $"The {field} cannot start with a space");
         return v;
     }
 }

@@ -17,30 +17,30 @@ let view = $('#view');
 let events = null;
 
 const routes = [
-  [/^#?\/?$/, () => dashboardView(view)],
-  [/^#\/new\/(sale|salesOrder|purchase|purchaseOrder)$/, (m) => billView(view, { kind: m[1] })],
-  [/^#\/edit\/(sale|salesOrder|purchase|purchaseOrder)\/(\d+)$/, (m) => billView(view, { kind: m[1], amendId: Number(m[2]) })],
-  [/^#\/from-order\/(\d+)$/, (m) => billView(view, { kind: 'sale', fromOrder: Number(m[1]) })],
-  [/^#\/draft\/([\w-]+)$/, async (m) => { const d = await get(`/${state.firm.id}/drafts/${m[1]}`); return billView(view, { kind: d.kind, draft: d }); }],
-  [/^#\/voucher\/(cashReceipt|bankReceipt|cashPayment|bankPayment|creditNote|debitNote)$/, (m) => voucherView(view, m[1])],
-  [/^#\/edit-voucher\/(\d+)\/(\d+)$/, (m) => voucherView(view, voucherKindOfTt(Number(m[1])), { editId: Number(m[2]) })],
-  [/^#\/cleanup(?:\/(\w+))?$/, (m) => cleanupView(view, m[1])],
-  [/^#\/items$/, () => itemsView(view)],
-  [/^#\/items\/new$/, () => itemForm(view, null)],
-  [/^#\/items\/(\d+)$/, (m) => itemForm(view, Number(m[1]))],
-  [/^#\/accounts(?:\?(all|Customer|Supplier))?$/, (m) => accountsView(view, m[1] ?? 'all')],
-  [/^#\/accounts\/new\/(Customer|Supplier)$/, (m) => accountForm(view, null, m[1])],
-  [/^#\/accounts\/(\d+)$/, (m) => accountForm(view, Number(m[1]))],
-  [/^#\/documents$/, () => documentsView(view)],
-  [/^#\/doc\/(\d+)$/, (m) => documentView(view, Number(m[1]))],
-  [/^#\/ledger(?:\/(\d+))?$/, (m) => ledgerView(view, m[1] ? Number(m[1]) : null)],
-  [/^#\/outstanding(?:\/(receivable|payable))?$/, (m) => outstandingView(view, m[1] ?? 'receivable')],
-  [/^#\/reports$/, () => reportsView(view)],
-  [/^#\/stock$/, () => stockView(view)],
-  [/^#\/drafts$/, () => draftsView(view)],
-  [/^#\/health$/, () => healthView(view)],
-  [/^#\/capture$/, () => captureView(view)],
-  [/^#\/settings$/, () => settingsView(view)],
+  [/^#?\/?$/, (m, v) => dashboardView(v)],
+  [/^#\/new\/(sale|salesOrder|purchase|purchaseOrder)$/, (m, v) => billView(v, { kind: m[1] })],
+  [/^#\/edit\/(sale|salesOrder|purchase|purchaseOrder)\/(\d+)$/, (m, v) => billView(v, { kind: m[1], amendId: Number(m[2]) })],
+  [/^#\/from-order\/(\d+)$/, (m, v) => billView(v, { kind: 'sale', fromOrder: Number(m[1]) })],
+  [/^#\/draft\/([\w-]+)$/, async (m, v) => { const d = await get(`/${state.firm.id}/drafts/${m[1]}`); if (v.isConnected) return billView(v, { kind: d.kind, draft: d }); }],
+  [/^#\/voucher\/(cashReceipt|bankReceipt|cashPayment|bankPayment|creditNote|debitNote)$/, (m, v) => voucherView(v, m[1])],
+  [/^#\/edit-voucher\/(\d+)\/(\d+)$/, (m, v) => voucherView(v, voucherKindOfTt(Number(m[1])), { editId: Number(m[2]) })],
+  [/^#\/cleanup(?:\/(\w+))?$/, (m, v) => cleanupView(v, m[1])],
+  [/^#\/items$/, (m, v) => itemsView(v)],
+  [/^#\/items\/new$/, (m, v) => itemForm(v, null)],
+  [/^#\/items\/(\d+)$/, (m, v) => itemForm(v, Number(m[1]))],
+  [/^#\/accounts(?:\?(all|Customer|Supplier))?$/, (m, v) => accountsView(v, m[1] ?? 'all')],
+  [/^#\/accounts\/new\/(Customer|Supplier)$/, (m, v) => accountForm(v, null, m[1])],
+  [/^#\/accounts\/(\d+)$/, (m, v) => accountForm(v, Number(m[1]))],
+  [/^#\/documents$/, (m, v) => documentsView(v)],
+  [/^#\/doc\/(\d+)$/, (m, v) => documentView(v, Number(m[1]))],
+  [/^#\/ledger(?:\/(\d+))?$/, (m, v) => ledgerView(v, m[1] ? Number(m[1]) : null)],
+  [/^#\/outstanding(?:\/(receivable|payable))?$/, (m, v) => outstandingView(v, m[1] ?? 'receivable')],
+  [/^#\/reports$/, (m, v) => reportsView(v)],
+  [/^#\/stock$/, (m, v) => stockView(v)],
+  [/^#\/drafts$/, (m, v) => draftsView(v)],
+  [/^#\/health$/, (m, v) => healthView(v)],
+  [/^#\/capture$/, (m, v) => captureView(v)],
+  [/^#\/settings$/, (m, v) => settingsView(v)],
 ];
 
 async function route() {
@@ -50,11 +50,14 @@ async function route() {
   const fresh = el('main', { id: 'view', tabindex: '-1' }, el('p', { class: 'muted' }, 'Loading…'));
   view.replaceWith(fresh);
   view = fresh;
+  // Each handler gets its own <main>: after an await, the module-level `view` may already be a newer screen.
+  const mine = fresh;
   try {
     if (!match) { location.hash = '#/'; return; }
-    await match[1](match[0]);
+    await match[1](match[0], mine);
   } catch (e) {
-    view.replaceChildren(el('h1', {}, 'Something went wrong'), el('p', { class: 'issue err' }, e.message), el('p', {}, el('a', { href: '#/' }, 'Back to dashboard')));
+    // A slow screen that fails after the operator moved on must not overwrite the screen now shown.
+    if (mine.isConnected) mine.replaceChildren(el('h1', {}, 'Something went wrong'), el('p', { class: 'issue err' }, e.message), el('p', {}, el('a', { href: '#/' }, 'Back to dashboard')));
   }
 }
 
@@ -66,9 +69,10 @@ function connectLive() {
   events.onopen = () => { live.className = 'live on'; text.textContent = 'Live with HQ'; };
   events.addEventListener('changed', async () => {
     await loadCatalogue().catch(() => {});
+    // Lists (dashboard, bills, outstanding, stock, ledger) subscribe to this and refresh their figures in place, keeping
+    // the search text, dates and row the operator is on; editors keep what he typed. Re-routing here used to rebuild
+    // the whole screen mid-keystroke whenever HQ saved anything.
     notify('changed');
-    // Lists refresh themselves when HQ (or another MK window) saves; editors keep what you typed.
-    if (/^#\/?$|^#\/(documents|outstanding|stock)/.test(location.hash || '#/')) route();
   });
   events.addEventListener('offline', () => { live.className = 'live off'; text.textContent = 'HQ database offline'; });
   events.onerror = () => { live.className = 'live off'; text.textContent = 'Reconnecting…'; };
@@ -82,8 +86,14 @@ async function selectFirm(id) {
   document.body.dataset.firm = state.firm.id;
   $('#firm').value = state.firm.id;
   for (const b of document.querySelectorAll('#firm-tabs button')) b.setAttribute('aria-selected', String(b.dataset.id === state.firm.id));
+  // The screen is about to be replaced without a hashchange: let a half-made bill keep itself in Drafts (under its own firm).
+  window.dispatchEvent(new Event('mk:leave'));
   state.catalogue = { items: [], parties: [], stamp: null };
-  await loadCatalogue(true);
+  const chosen = state.firm.id;
+  // A failed catalogue load still opens the firm (lists and reports work; the live link retries it on the next change),
+  // and says so, instead of leaving the previous firm's screen up under the new firm's colours.
+  try { await loadCatalogue(true); } catch (e) { if (state.firm.id === chosen) toast(`Items and parties could not be loaded: ${e.message}`, true); }
+  if (state.firm.id !== chosen) return; // the operator picked another firm meanwhile; that selection finishes the job
   connectLive();
   if (state.firm.contract && !state.firm.contract.writesAllowed) toast(state.firm.contract.summary, true);
   route();
@@ -113,7 +123,11 @@ async function start() {
   window.addEventListener('hashchange', route);
   document.addEventListener('keydown', (e) => {
     const link = document.querySelector(`#nav a[data-key="${e.key}"]`);
-    if (link && !e.ctrlKey && !e.altKey) { e.preventDefault(); location.hash = link.getAttribute('href'); }
+    if (!link || e.ctrlKey || e.altKey) return;
+    e.preventDefault();
+    // Not under an open dialog (e.g. "Saved" or "Save changes?"): the dialog would then act on a screen no longer shown.
+    if (document.querySelector('.modal-back')) return;
+    location.hash = link.getAttribute('href');
   });
   document.addEventListener('keydown', rowKeys);
   initAssistant({ selectFirm });
@@ -123,11 +137,12 @@ async function start() {
 // Lists of bills, accounts and items are worked from the keyboard: ↓ from a search box (or from nowhere) enters the
 // list, ↑/↓ move, Enter opens. A search box marked data-rows also opens the top row on Enter.
 function rowKeys(e) {
-  if (e.ctrlKey || e.altKey || document.querySelector('.modal-back')) return;
+  if (e.ctrlKey || e.altKey || document.querySelector('.modal-back') || document.querySelector('#view[data-own-keys]')) return;
   const rows = () => [...document.querySelectorAll('#view tr.click')];
   const go = (tr) => { if (!tr) return; tr.tabIndex = -1; tr.focus(); tr.scrollIntoView({ block: 'nearest' }); };
   const t = e.target;
-  const row = t.closest?.('tr.click');
+  // A button or box inside a row (Drafts' Discard) keeps its own Enter: it must not open the row instead.
+  const row = t.matches?.('button, a, input, select, textarea') ? null : t.closest?.('tr.click');
   if (row) {
     const list = rows();
     const i = list.indexOf(row);

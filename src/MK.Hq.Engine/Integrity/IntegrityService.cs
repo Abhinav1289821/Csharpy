@@ -97,12 +97,14 @@ public sealed class IntegrityService
     private readonly FirmRegistry _firms;
     private readonly WriteCoordinator _coordinator;
     private readonly Catalogue _catalogue;
+    private readonly FirmProfiles _profiles;
     private readonly string _log;
     private readonly string? _companyDatabase;
     private readonly IReadOnlyList<IntegrityCheck> _checks;
 
-    public IntegrityService(FirmRegistry firms, WriteCoordinator coordinator, Catalogue catalogue, HqOptions options)
+    public IntegrityService(FirmRegistry firms, WriteCoordinator coordinator, Catalogue catalogue, FirmProfiles profiles, HqOptions options)
     {
+        _profiles = profiles;
         _firms = firms;
         _coordinator = coordinator;
         _catalogue = catalogue;
@@ -203,7 +205,7 @@ public sealed class IntegrityService
         var what = c.Fix == "owner" && c.Ask.Length > 0 ? c.Ask : c.Will.Length > 0 ? c.Will : c.Advice;
         // Findings: how many the repair will settle (a partial repair: only its part). The hash covers the whole check.
         var repairable = c.RepairsWhere is null ? rows.Count : await s.ScalarAsync<int>($"{Count(Sql(c))} WHERE ({c.RepairsWhere})");
-        return new RepairPreview(c.Id, c.Title, repairable, what, Hash(c, rows.Count), rows.Take(20).Select(Text).ToList())
+        return new RepairPreview(c.Id, c.Title, repairable, what, Hash(c, rows), rows.Take(20).Select(Text).ToList())
         {
             Items = items,
             ChoiceLabel = c.Choice?.Label,
@@ -228,8 +230,16 @@ public sealed class IntegrityService
 
     private static string Literal(string v) => long.TryParse(v, out var n) ? n.ToString(System.Globalization.CultureInfo.InvariantCulture) : "N'" + v.Replace("'", "''") + "'";
 
-    private static string Hash(IntegrityCheck c, int count) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{c.Id}|{c.FixSql}|{c.EngineRepair}|{count}"))).ToLowerInvariant();
+    /// <summary>What the owner reviewed: the check and every finding it listed. Hashing only the count let a repair rewrite a
+    /// bill that entered the list after the review while another left it.</summary>
+    private static string Hash(IntegrityCheck c, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        var findings = rows.Select(r => string.Join("\u001f", r.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(kv => kv.Key + "=" + Convert.ToString(kv.Value, System.Globalization.CultureInfo.InvariantCulture))))
+            .Order(StringComparer.Ordinal);
+        var text = $"{c.Id}|{c.FixSql}|{c.EngineRepair}|{rows.Count}\n" + string.Join("\n", findings);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
+    }
 
     /// <param name="decided">For a finding that needs the owner's decision: he has read the question and chosen the repair.</param>
     /// <param name="key">For one-at-a-time repairs: which finding (its key column, as listed by the preview).</param>
@@ -265,7 +275,7 @@ public sealed class IntegrityService
                     Guard.Require(await session.ScalarAsync<int>(Count(Sql(first))) == 0, "INTEGRITY_ORDER",
                         $"Do this first: {first.Title}", FailureKind.Conflict);
                 var rows = await session.RowsAsync(detect);
-                Guard.Require(Hash(c, rows.Count) == expectedHash, "REVIEW_CHANGED", "The data changed since you looked; check again", FailureKind.Conflict);
+                Guard.Require(Hash(c, rows) == expectedHash, "REVIEW_CHANGED", "The data changed since you looked; check again", FailureKind.Conflict);
                 if (single && c.Key is { } k1)
                 {
                     rows = rows.Where(r => Str(r[k1.Column]) == key!.Trim()).ToList();
@@ -333,6 +343,7 @@ public sealed class IntegrityService
         }
         else throw HqException.Unsupported("INTEGRITY_ENGINE_REPAIR", $"Engine repair '{c.EngineRepair}' is not available");
         _catalogue.Invalidate(firm.Id);
+        _profiles.Invalidate(firm.Id); // config repairs (round-off type, charge accounts, bill types) change the firm profile
         Log(firmId, c, result.Before, result.After, JsonSerializer.Serialize(new { key, choice, examples }, Json));
         return result;
     }

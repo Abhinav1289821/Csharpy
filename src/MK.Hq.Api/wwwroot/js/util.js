@@ -28,8 +28,12 @@ export function el(tag, attrs = {}, ...children) {
 export const $ = (sel, root = document) => root.querySelector(sel);
 
 const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-export const money = (v) => (v === null || v === undefined || v === '' ? '' : inr.format(Number(v)));
-export const qty = (v) => (v === null || v === undefined ? '' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 4 }));
+const inrQty = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 4 });
+// A sum like 0.1 + 0.2 - 0.3 is -0.00000000000000005: it must read "0.00", not "-0.00" (a minus on a nil balance
+// or a nil difference from the printed total makes the operator look twice).
+const noNegativeZero = (s) => s.replace(/^-(?=[0.,]*$)/, '');
+export const money = (v) => (v === null || v === undefined || v === '' ? '' : noNegativeZero(inr.format(Number(v))));
+export const qty = (v) => (v === null || v === undefined || v === '' ? '' : noNegativeZero(inrQty.format(Number(v))));
 export const today = () => {
   const d = new Date();
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
@@ -40,6 +44,26 @@ export const addDays = (iso, n) => {
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 };
+
+/** Number inputs: digits and the first decimal point only ("1..5" would otherwise read as not-a-number and be dropped). */
+export const oneDecimal = (v) => {
+  const s = String(v).replace(/[^0-9.]/g, '');
+  const dot = s.indexOf('.');
+  return dot < 0 ? s : s.slice(0, dot + 1) + s.slice(dot + 1).replace(/\./g, '');
+};
+
+/**
+ * Only the newest of several overlapping requests may land on screen. `const ticket = newest()`; in each load:
+ * `const current = ticket(); const r = await get(...); if (!current()) return;` — a slower answer to an older search
+ * (or older dates) is then dropped instead of overwriting the newer one.
+ */
+export function newest() {
+  let n = 0;
+  return () => {
+    const mine = ++n;
+    return () => mine === n;
+  };
+}
 
 export function debounce(fn, ms) {
   let t;
@@ -140,31 +164,53 @@ export function lookup({ placeholder = '', value = '', search, onPick, onInput, 
   return { wrap, input };
 }
 
+// The searchable text of an entry, cached per field list: the parties screen searches different fields from the bill's
+// party lookup, so one shared cache on the entry would make whichever ran first decide what the other can find
+// (a landline number not found in the bill after the parties screen was searched). Pass a module-level `fields`
+// function to benefit from the cache; an inline arrow is simply recomputed.
+const hays = new WeakMap();
+const hayOf = (e, fields) => {
+  let cache = hays.get(fields);
+  if (!cache) hays.set(fields, (cache = new WeakMap()));
+  let hay = cache.get(e);
+  if (hay === undefined) cache.set(e, (hay = fields(e).join(' ').toLowerCase()));
+  return hay;
+};
+
 /** Rank catalogue entries: every typed word must appear; names that start with the words come first. */
 export function rank(entries, text, fields, limit = 30) {
   const words = text.toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return [];
   const out = [];
   for (const e of entries) {
-    const hay = (e._hay ??= fields(e).join(' ').toLowerCase());
+    const hay = hayOf(e, fields);
     let score = 0;
     let ok = true;
     for (const w of words) {
       const at = hay.indexOf(w);
       if (at < 0) { ok = false; break; }
-      score += at === 0 ? 0 : hay[at - 1] === ' ' ? 1 : 3;
+      // Judge the best place the word appears, not the first: "tap" in "stoptap tap" starts a word.
+      score += at === 0 ? 0 : hay[at - 1] === ' ' || hay.includes(' ' + w) ? 1 : 3;
     }
     if (ok) out.push([score + hay.length / 1000, e]);
   }
   return out.sort((a, b) => a[0] - b[0]).slice(0, limit).map((x) => x[1]);
 }
 
-export function csv(rows, columns, filename) {
+/** The CSV text (Excel-ready: CRLF rows, quoted where needed). Separate from csv() so it can be checked without a browser. */
+export function csvText(rows, columns) {
   const esc = (v) => {
-    const s = v === null || v === undefined ? '' : String(v);
-    return /[",\n]/.test(s) ? '"' + s.replaceAll('"', '""') + '"' : s;
+    let s = v === null || v === undefined ? '' : String(v);
+    // A party name or narration typed as "=..." / "+..." / "@..." would run as a formula when the accountant opens the
+    // file in Excel: keep it text. Numbers (a negative balance) are left as numbers.
+    if (typeof v === 'string' && (/^[=+@\t\r]/.test(s) || (s.startsWith('-') && !Number.isFinite(Number(s))))) s = "'" + s;
+    return /[",\r\n]/.test(s) ? '"' + s.replaceAll('"', '""') + '"' : s;
   };
-  const text = [columns.map((c) => esc(c.title)).join(','), ...rows.map((r) => columns.map((c) => esc(typeof c.get === 'function' ? c.get(r) : r[c.get])).join(','))].join('\r\n');
+  return [columns.map((c) => esc(c.title)).join(','), ...rows.map((r) => columns.map((c) => esc(typeof c.get === 'function' ? c.get(r) : r[c.get])).join(','))].join('\r\n');
+}
+
+export function csv(rows, columns, filename) {
+  const text = csvText(rows, columns);
   const a = el('a', { href: URL.createObjectURL(new Blob(['﻿' + text], { type: 'text/csv' })), download: filename });
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);

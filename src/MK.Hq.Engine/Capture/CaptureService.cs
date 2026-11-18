@@ -67,7 +67,9 @@ public sealed class CaptureService(
 
     public CaptureRecord RemovePage(string firmId, string id, int page)
     {
-        Owned(firmId, id);
+        var c = Owned(firmId, id);
+        // Checked before deleting: a saved bill keeps its evidence, and a page must not vanish under a read in progress.
+        Guard.Require(c.Status is not (CaptureStore.States.Saved or CaptureStore.States.Extracting), "CAPTURE_BUSY", "Wait until the photo has been read", FailureKind.Conflict);
         store.RemovePage(id, page);
         return Retry(id, null);
     }
@@ -81,9 +83,14 @@ public sealed class CaptureService(
 
     public CaptureRecord Retry(string id, string? model)
     {
-        var c = store.Get(id) ?? throw HqException.NotFound("CAPTURE_NOT_FOUND", "That photo is no longer here");
-        Guard.Require(c.Status is not (CaptureStore.States.Saved or CaptureStore.States.Extracting), "CAPTURE_BUSY", "This photo is being read or is already saved as a bill", FailureKind.Conflict);
-        store.Update(id, CaptureStore.States.Received);
+        // Compare-and-set on the status we checked: a check followed by a blind update let a bill saved (Learn) or claimed
+        // by a worker in between be put back to "received" and read again, giving a second draft of an already saved bill.
+        while (true)
+        {
+            var c = store.Get(id) ?? throw HqException.NotFound("CAPTURE_NOT_FOUND", "That photo is no longer here");
+            Guard.Require(c.Status is not (CaptureStore.States.Saved or CaptureStore.States.Extracting), "CAPTURE_BUSY", "This photo is being read or is already saved as a bill", FailureKind.Conflict);
+            if (store.Update(id, CaptureStore.States.Received, onlyFrom: c.Status)) break;
+        }
         _queue.Writer.TryWrite((id, model));
         return store.Get(id)!;
     }
@@ -95,25 +102,37 @@ public sealed class CaptureService(
 
     public async Task ProcessAsync(string id, string? model, CancellationToken ct)
     {
+        // Claim atomically: the same id can be queued twice (a rotate or retry while it waits), and two workers must not
+        // both read it (double AI cost, and two drafts of one bill, either of which could be saved).
+        if (!store.Update(id, CaptureStore.States.Extracting, countAttempt: true, onlyFrom: CaptureStore.States.Received)) return;
         var c = store.Get(id);
-        if (c is null || c.Status is CaptureStore.States.Saved or CaptureStore.States.Discarded) return;
-        store.Update(id, CaptureStore.States.Extracting, countAttempt: true);
+        if (c is null) return;
         try
         {
             await UprightAsync(id, ct);
             var result = await extractor.ExtractAsync(store.Images(id), c.Kind, model, ct);
             var (draftId, summary) = await BuildDraftAsync(c, result, ct);
-            store.Update(id, CaptureStore.States.Ready, result.Model, JsonSerializer.Serialize(result, Json), draftId, summary, elapsedMs: result.ElapsedMs);
+            // Only finish a read that is still ours: a Discard (or a save) meanwhile must not be brought back to life.
+            if (!store.Update(id, CaptureStore.States.Ready, result.Model, JsonSerializer.Serialize(result, Json), draftId, summary, elapsedMs: result.ElapsedMs,
+                    onlyFrom: CaptureStore.States.Extracting))
+            {
+                drafts.DeleteDraft(draftId, c.Firm);
+                log.LogInformation("Capture {Id} changed while it was read; its new draft was dropped", id);
+                return;
+            }
             log.LogInformation("Capture {Id} read by {Model} in {Ms} ms: {Summary}", id, result.Model, result.ElapsedMs, summary);
         }
         catch (HqException e)
         {
-            store.Update(id, CaptureStore.States.Failed, errorCode: e.Code, errorMessage: e.Message);
+            store.Update(id, CaptureStore.States.Failed, errorCode: e.Code, errorMessage: e.Message, onlyFrom: CaptureStore.States.Extracting);
             log.LogWarning("Capture {Id} failed: {Code} {Message}", id, e.Code, e.Message);
         }
-        catch (Exception e) when (e is not OperationCanceledException)
+        // Only a shutdown leaves the read "extracting" (Pending() hands it back at the next start). Any other cancellation
+        // (an HTTP or agent timeout inside a reader) must fail it, or the photo stays "being read" and refuses every
+        // retry, rotate and new page until the service restarts.
+        catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            store.Update(id, CaptureStore.States.Failed, errorCode: "CAPTURE_FAILED", errorMessage: "Reading the photo failed unexpectedly; retry");
+            store.Update(id, CaptureStore.States.Failed, errorCode: "CAPTURE_FAILED", errorMessage: "Reading the photo failed unexpectedly; retry", onlyFrom: CaptureStore.States.Extracting);
             log.LogError(e, "Capture {Id} crashed", id);
         }
     }
@@ -167,9 +186,11 @@ public sealed class CaptureService(
         var interstate = false;
         if (purchase)
         {
-            var gstin = written?.Gstin;
+            // Normalised once for both uses: a lowercase or spaced reading must neither fail the check digit nor miss the
+            // supplier (whose HQ GSTIN is compared in the same form).
+            var gstin = NormalGstin(written?.Gstin);
             if (gstin is not null && !Gstin.IsValid(gstin)) warnings.Add($"Supplier GSTIN '{gstin}' fails the GST check digit; check the photo");
-            var byGstin = gstin is null ? [] : snapshot.Parties.Where(p => p.Active && p.Gstin == gstin && p.Type is "Supplier" or "Customer-Supplier").ToList();
+            var byGstin = gstin is null ? [] : snapshot.Parties.Where(p => p.Active && NormalGstin(p.Gstin) == gstin && p.Type is "Supplier" or "Customer-Supplier").ToList();
             var byName = written?.Name is { } n ? snapshot.Parties.Where(p => p.Active && p.IsSupplier && Same(p.Name, n)).ToList() : [];
             if (byGstin.Count == 1) { accountId = byGstin[0].AccountId; paymentMode = 1; }
             else if (byGstin.Count > 1) warnings.Add($"{byGstin.Count} HQ suppliers share GSTIN {gstin}; choose the account");
@@ -178,7 +199,7 @@ public sealed class CaptureService(
             var stateCode = Gstin.StateCode(gstin);
             interstate = stateCode is not null && stateCode != "37";
             if (interstate) warnings.Add($"Supplier is in another state ({Gstin.HqStateCaption(stateCode!) ?? stateCode}): saved as an IGST purchase");
-            if (x.Buyer?.Gstin is { } buyerGstin && firm.Options.Gstin is { } own && buyerGstin != own)
+            if (NormalGstin(x.Buyer?.Gstin) is { } buyerGstin && NormalGstin(firm.Options.Gstin) is { } own && buyerGstin != own)
                 warnings.Add($"This bill is addressed to GSTIN {buyerGstin}, not {firm.Name} ({own}). Check the firm.");
             else if (x.Buyer?.Name is { } buyer && firms.All.FirstOrDefault(f => f.Id != firm.Id && Same(f.Name, buyer)) is { } other)
                 warnings.Add($"The bill is addressed to {buyer}; it may belong to {other.Name}");
@@ -205,7 +226,7 @@ public sealed class CaptureService(
         var aliases = store.Aliases(c.Firm);
         IReadOnlyDictionary<long, int> history;
         await using (var s = await firm.OpenAsync(ct))
-            history = await HistoryAsync(s, purchase, accountId, written?.Gstin, before: null);
+            history = await HistoryAsync(s, purchase, accountId, purchase ? NormalGstin(written?.Gstin) : written?.Gstin, before: null);
         var lines = new List<object>();
         var matched = 0;
         foreach (var (l, i) in x.Lines.Select((l, i) => (l, i)))
@@ -219,18 +240,13 @@ public sealed class CaptureService(
                 warnings.Add($"Line {i + 1} ({l.Name}): quantity not read; set to 1");
                 quantity = 1;
             }
-            var rate = l.Rate;
-            if (rate is not null && l.Amount is { } printedAmount && printedAmount > 0 && Math.Abs(rate.Value * quantity.Value - printedAmount) > Math.Max(1m, printedAmount * 0.01m))
-            {
+            // The same rule as the GST-basis preview below (RateFor), so the basis is chosen on the rates the draft shows.
+            var rate = PrintedRate(l);
+            if (l.Rate is { } printedRate && rate != Money.Round(printedRate, 4) && l.Amount is { } printedAmount)
                 // e.g. P&F printed as 220 + 18% = 259.60: the amount is what the bill charges for this row.
-                warnings.Add($"Line {i + 1} ({l.Name}): {Money.Plain(quantity.Value)} × {Money.Text(rate.Value)} ≠ printed amount {Money.Text(printedAmount)}; using {Money.Text(printedAmount)} ÷ {Money.Plain(quantity.Value)}");
-                rate = Money.Round(printedAmount / quantity.Value, 4);
-            }
-            if (rate is null && l.Amount is { } amt && quantity > 0)
-            {
-                rate = Money.Round(amt / quantity.Value, 4);
-                if (purchase) warnings.Add($"Line {i + 1}: rate worked out from the amount ({Money.Text(amt)} ÷ {Money.Plain(quantity.Value)})");
-            }
+                warnings.Add($"Line {i + 1} ({l.Name}): {Money.Plain(quantity.Value)} × {Money.Text(printedRate)} ≠ printed amount {Money.Text(printedAmount)}; using {Money.Text(printedAmount)} ÷ {Money.Plain(quantity.Value)}");
+            else if (l.Rate is null && l.Amount is { } amt && purchase)
+                warnings.Add($"Line {i + 1}: rate worked out from the amount ({Money.Text(amt)} ÷ {Money.Plain(quantity.Value)})");
             rate ??= chosen is null ? null : purchase ? chosen.PurchaseRate : chosen.SaleRate;
             lines.Add(new
             {
@@ -265,9 +281,10 @@ public sealed class CaptureService(
                         Kind = DocumentKind.Purchase, Date = date, PaymentMode = paymentMode, AccountId = accountId, Interstate = interstate,
                         Basis = b == "inclusive" ? TaxBasis.Inclusive : TaxBasis.Exclusive,
                         Supplier = new SupplierBill((x.InvoiceNumber ?? "PREVIEW") + "~", date),
-                        Lines = x.Lines.Select((l, i) => new LineRequest(matcher.Match(l, aliases, history: history).Chosen!.ItemId, matcher.Match(l, aliases, history: history).Chosen!.UnitId,
-                            l.Quantity is > 0 ? l.Quantity.Value : 1, RateFor(l),
-                            l.DiscountPercent ?? x.DiscountPercent ?? 0)).ToList(),
+                        // Exactly the draft's lines: its rate (catalogue purchase rate when none was read, not 0) and discount.
+                        Lines = x.Lines.Select(l => (Line: l, Item: matcher.Match(l, aliases, history: history).Chosen!))
+                            .Select(p => new LineRequest(p.Item.ItemId, p.Item.UnitId, p.Line.Quantity is > 0 ? p.Line.Quantity.Value : 1,
+                                RateFor(p.Line, p.Item.PurchaseRate), Math.Max(0, p.Line.DiscountPercent ?? x.DiscountPercent ?? 0))).ToList(),
                     }, ct);
                     results.Add((b, p.Quote.Payable));
                 }
@@ -343,12 +360,26 @@ public sealed class CaptureService(
         return rows.ToDictionary(r => r.Item, r => purchase ? r.N : Math.Max(1, r.N / 10));
     }
 
-    /// <summary>The unit rate the draft uses: the printed rate, unless the printed amount says otherwise (e.g. P&amp;F incl. GST).</summary>
-    public static decimal RateFor(ExtractedLine l)
+    /// <summary>The unit rate the bill itself gives: the printed rate, unless the printed amount says otherwise (e.g. P&amp;F
+    /// incl. GST); the amount ÷ quantity when only the amount was read; null when neither was.</summary>
+    public static decimal? PrintedRate(ExtractedLine l)
     {
         var q = l.Quantity is > 0 ? l.Quantity.Value : 1;
         if (l.Rate is { } r && (l.Amount is not { } a || a <= 0 || Math.Abs(r * q - a) <= Math.Max(1m, a * 0.01m))) return Money.Round(r, 4);
-        return l.Amount is { } amount ? Money.Round(amount / q, 4) : 0;
+        return l.Amount is { } amount ? Money.Round(amount / q, 4) : null;
+    }
+
+    /// <summary>The unit rate the draft uses: <see cref="PrintedRate"/>, else the matched item's own rate
+    /// (<paramref name="fallback"/>) — the draft never prices an unread line at 0.</summary>
+    public static decimal RateFor(ExtractedLine l, decimal fallback = 0) => PrintedRate(l) ?? fallback;
+
+    /// <summary>A GSTIN as compared and checked: every space removed, upper case; null when nothing is left.
+    /// <see cref="Gstin.IsValid"/> itself stays strict.</summary>
+    public static string? NormalGstin(string? gstin)
+    {
+        if (gstin is null) return null;
+        var s = new string(gstin.Where(c => !char.IsWhiteSpace(c)).ToArray()).ToUpperInvariant();
+        return s.Length == 0 ? null : s;
     }
 
     private static bool Same(string a, string b) => ItemMatcher.AliasKey(a) == ItemMatcher.AliasKey(b);

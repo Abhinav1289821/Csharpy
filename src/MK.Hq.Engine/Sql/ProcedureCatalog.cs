@@ -78,25 +78,49 @@ public sealed class ProcedureCatalog
     public async Task<ProcedureSignature> GetAsync(SqlConnection connection, SqlTransaction? transaction, string procedure)
     {
         Guard.Require(Allowed.Contains(procedure), "HQ_PROCEDURE_NOT_ALLOWED", $"{procedure} is not on the engine's allow-list", FailureKind.Internal);
-        var all = await _byDatabase.GetOrAdd(connection.Database, _ => new(() => LoadAsync(connection, transaction))).Value;
+        var all = await LoadCachedAsync(connection, transaction);
         return all.TryGetValue(procedure, out var sig)
             ? sig
             : throw HqException.Unsupported("HQ_PROCEDURE_MISSING", $"HQ procedure {procedure} is missing from {connection.Database}");
     }
 
-    public async Task<IReadOnlyDictionary<string, ProcedureSignature>> AllAsync(SqlConnection connection) =>
-        await _byDatabase.GetOrAdd(connection.Database, _ => new(() => LoadAsync(connection, null))).Value;
+    public Task<IReadOnlyDictionary<string, ProcedureSignature>> AllAsync(SqlConnection connection) => LoadCachedAsync(connection, null);
 
     public void Invalidate(string database) => _byDatabase.TryRemove(database, out _);
 
+    /// <summary>One load per database shared by concurrent callers. A failed load (timeout, lock timeout, dropped
+    /// connection) is evicted, otherwise every later write to that firm would fail until the next contract check.</summary>
+    private async Task<IReadOnlyDictionary<string, ProcedureSignature>> LoadCachedAsync(SqlConnection connection, SqlTransaction? transaction)
+    {
+        var database = connection.Database;
+        var lazy = _byDatabase.GetOrAdd(database, _ => new(() => LoadAsync(connection, transaction)));
+        try
+        {
+            return await lazy.Value;
+        }
+        catch
+        {
+            _byDatabase.TryRemove(KeyValuePair.Create(database, lazy));
+            throw;
+        }
+    }
+
     private static async Task<IReadOnlyDictionary<string, ProcedureSignature>> LoadAsync(SqlConnection connection, SqlTransaction? transaction)
     {
-        var rows = await connection.QueryAsync<(string Proc, string Definition, string? Param, string? TypeName, short MaxLength, byte Precision, byte Scale, bool IsOutput)>(
+        IEnumerable<(string Proc, string Definition, string? Param, string? TypeName, short MaxLength, byte Precision, byte Scale, bool IsOutput)> rows;
+        try
+        {
+            rows = await connection.QueryAsync<(string Proc, string Definition, string? Param, string? TypeName, short MaxLength, byte Precision, byte Scale, bool IsOutput)>(
             """
             SELECT p.name, ISNULL(OBJECT_DEFINITION(p.object_id),''), pa.name, TYPE_NAME(pa.user_type_id), ISNULL(pa.max_length,0), ISNULL(pa.precision,0), ISNULL(pa.scale,0), ISNULL(pa.is_output,0)
             FROM sys.procedures p LEFT JOIN sys.parameters pa ON pa.object_id = p.object_id
             WHERE p.name IN @names ORDER BY p.name, pa.parameter_id
             """, new { names = Allowed.ToArray() }, transaction);
+        }
+        catch (SqlException e)
+        {
+            throw HqSession.Translate(e);
+        }
         return rows.GroupBy(r => r.Proc, StringComparer.OrdinalIgnoreCase).ToDictionary(
             g => g.Key,
             g =>

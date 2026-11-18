@@ -18,6 +18,8 @@ public sealed class AiSettings
     private readonly string _path;
     private readonly object _gate = new();
     private string? _key;
+    /// <summary>The key that belongs in the file: never the GEMINI_API_KEY environment override.</summary>
+    private string? _savedKey;
     private string _model = Models[0];
     private string _source = "none";
 
@@ -49,7 +51,7 @@ public sealed class AiSettings
             {
                 apiKey = apiKey.Trim();
                 Guard.Require(apiKey.Length is >= 20 and <= 200 && apiKey.All(c => c is > ' ' and < '\u007f'), "API_KEY_INVALID", "That does not look like a Google API key");
-                _key = apiKey;
+                _key = _savedKey = apiKey;
                 _source = "settings";
             }
             Save();
@@ -60,18 +62,22 @@ public sealed class AiSettings
     {
         if (File.Exists(_path))
         {
-            var stored = JsonSerializer.Deserialize<Stored>(File.ReadAllText(_path));
+            Stored? stored = null;
+            // A damaged file must not stop the service from starting (the capture worker needs these settings): start
+            // without a key and let the owner enter it again.
+            try { stored = JsonSerializer.Deserialize<Stored>(File.ReadAllText(_path)); }
+            catch (JsonException) { }
             if (stored is not null)
             {
                 if (Models.Contains(stored.Model)) _model = stored.Model;
-                if (stored.ProtectedKey is { Length: > 0 }) { _key = Unprotect(stored.ProtectedKey); _source = "settings"; }
+                if (stored.ProtectedKey is { Length: > 0 }) { _key = _savedKey = Unprotect(stored.ProtectedKey); _source = "settings"; }
             }
         }
         else if (options.ImportAiSettingsFrom is { } legacy && File.Exists(legacy))
         {
             // One-time import from the previous capture app on this PC (same Windows user, same key).
             using var doc = JsonDocument.Parse(File.ReadAllText(legacy));
-            if (doc.RootElement.TryGetProperty("apiKey", out var k) && k.GetString() is { Length: > 0 } key) { _key = key; _source = "imported"; }
+            if (doc.RootElement.TryGetProperty("apiKey", out var k) && k.GetString() is { Length: > 0 } key) { _key = _savedKey = key; _source = "imported"; }
             if (doc.RootElement.TryGetProperty("model", out var m) && Models.Contains(m.GetString() ?? "")) _model = m.GetString()!;
             if (_key is not null) Save();
         }
@@ -81,7 +87,10 @@ public sealed class AiSettings
     private void Save()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
-        File.WriteAllText(_path, JsonSerializer.Serialize(new Stored(_model, _key is null ? null : Protect(_key))));
+        // Write-then-rename, so a power cut leaves the old settings or the new ones, never half a file.
+        var temp = _path + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(new Stored(_model, _savedKey is null ? null : Protect(_savedKey))));
+        File.Move(temp, _path, overwrite: true);
     }
 
     private static string Protect(string value) => OperatingSystem.IsWindows()

@@ -143,17 +143,38 @@ public sealed partial class GemmaExtractor(AiSettings settings, HttpClient http)
                     _ => new HqException("AI_REQUEST_REJECTED", $"Google refused the request ({(int)response.StatusCode}). Try the other model or a clearer photo.", FailureKind.Unavailable),
                 };
             }
-            using var doc = JsonDocument.Parse(json);
+            return ReadReply(json);
+        }
+    }
+
+    /// <summary>
+    /// The answer text of a successful generateContent reply. Every shape Google (or a proxy in between) can send back —
+    /// not JSON, no candidates, a candidate stopped for SAFETY/RECITATION with no content, odd types — becomes an
+    /// HqException the retry loop understands, never a KeyNotFound/InvalidOperation crash that fails the photo outright.
+    /// </summary>
+    public static (string Text, int? Prompt, int? Output) ReadReply(string json)
+    {
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json); }
+        catch (JsonException) { throw new HqException("AI_SERVER", "Google sent back something that is not an answer; retrying", FailureKind.Unavailable); }
+        using (doc)
+        {
             var root = doc.RootElement;
-            if (!root.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0)
-                throw new HqException("AI_REPLY_BLOCKED", "Google returned no answer for this photo" + (root.TryGetProperty("promptFeedback", out var fb) ? $" ({fb})" : ""), FailureKind.Unavailable);
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("candidates", out var candidates) || candidates.ValueKind != JsonValueKind.Array || candidates.GetArrayLength() == 0)
+                throw new HqException("AI_REPLY_BLOCKED", "Google returned no answer for this photo" +
+                    (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("promptFeedback", out var fb) ? $" ({fb})" : ""), FailureKind.Unavailable);
             var candidate = candidates[0];
-            var finish = candidate.TryGetProperty("finishReason", out var f) ? f.GetString() : null;
+            var finish = candidate.ValueKind == JsonValueKind.Object && candidate.TryGetProperty("finishReason", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null;
             if (finish == "MAX_TOKENS") throw HqException.Invalid("AI_REPLY_TOO_LONG", "The bill is too long for one photo; photograph it in two parts");
-            var text = string.Concat(candidate.GetProperty("content").GetProperty("parts").EnumerateArray()
-                .Where(p => p.TryGetProperty("text", out _) && !(p.TryGetProperty("thought", out var t) && t.ValueKind == JsonValueKind.True))
+            if (candidate.ValueKind != JsonValueKind.Object || !candidate.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Object
+                || !content.TryGetProperty("parts", out var parts) || parts.ValueKind != JsonValueKind.Array)
+                throw new HqException("AI_REPLY_BLOCKED", $"Google returned no answer for this photo ({finish ?? "no content"})", FailureKind.Unavailable);
+            var text = string.Concat(parts.EnumerateArray()
+                .Where(p => p.ValueKind == JsonValueKind.Object && p.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String
+                            && !(p.TryGetProperty("thought", out var th) && th.ValueKind == JsonValueKind.True))
                 .Select(p => p.GetProperty("text").GetString()));
-            int? Usage(string name) => root.TryGetProperty("usageMetadata", out var u) && u.TryGetProperty(name, out var v) ? v.GetInt32() : null;
+            int? Usage(string name) => root.TryGetProperty("usageMetadata", out var u) && u.ValueKind == JsonValueKind.Object && u.TryGetProperty(name, out var v)
+                && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : null;
             return (text, Usage("promptTokenCount"), Usage("candidatesTokenCount"));
         }
     }
@@ -227,7 +248,8 @@ public sealed partial class GemmaExtractor(AiSettings settings, HttpClient http)
         ExtractedParty? Party(string name)
         {
             if (!root.TryGetProperty(name, out var p) || p.ValueKind != JsonValueKind.Object) return null;
-            var party = new ExtractedParty(Str(p, "name", 100), Str(p, "gstin", 20)?.ToUpperInvariant().Replace(" ", ""), Str(p, "address", 200), Str(p, "town", 50), Str(p, "mobile", 30), Str(p, "state", 60));
+            // Spaces go before the length clip: "37 ABDCS 0279 C1Z H" written out with gaps is still one 15-character GSTIN.
+            var party = new ExtractedParty(Str(p, "name", 100), Clip(CaptureService.NormalGstin(Str(p, "gstin", 60)), 20), Str(p, "address", 200), Str(p, "town", 50), Str(p, "mobile", 30), Str(p, "state", 60));
             return party is { Name: null, Gstin: null, Town: null, Mobile: null } ? null : party;
         }
 

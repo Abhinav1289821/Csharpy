@@ -39,7 +39,14 @@ export async function api(method, path, body, extraHeaders = {}) {
   }
   if (res.status === 304) return null;
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    // Not our JSON (a proxy's or the OS's error page, a cut-off reply): keep the HTTP status in the message instead of
+    // surfacing "Unexpected token <" to the operator; a 200 we cannot read is not a success either.
+    if (res.ok) throw new ApiError(res.status, { code: 'BAD_REPLY', message: 'MK Billing sent a reply that could not be read. Try again.' });
+  }
   if (!res.ok) throw new ApiError(res.status, data);
   return data;
 }

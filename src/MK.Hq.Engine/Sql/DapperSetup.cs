@@ -30,7 +30,8 @@ public static class DapperSetup
 
     private sealed class CharHandler : SqlMapper.TypeHandler<char>
     {
-        public override char Parse(object value) => value is string s && s.Length > 0 ? s.TrimStart()[0] : Convert.ToChar(value);
+        // A blank char(1) column ("" or " ") reads as a space; s.TrimStart()[0] threw on " ".
+        public override char Parse(object value) => value is string s ? (s.TrimStart() is { Length: > 0 } t ? t[0] : ' ') : Convert.ToChar(value);
         public override void SetValue(IDbDataParameter parameter, char value) { parameter.DbType = DbType.String; parameter.Value = value.ToString(); }
     }
 }

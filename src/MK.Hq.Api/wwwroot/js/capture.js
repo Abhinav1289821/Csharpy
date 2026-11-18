@@ -1,7 +1,7 @@
 // Photo capture: scanner files, webcam, phone (QR). The AI (Antigravity, or Gemma 4) reads each bill in the background; the result opens as a
 // draft in the normal bill editor, beside the photo. Nothing reaches HQ until the user saves the bill.
 import { get, post, del, api, tokenQuery } from './api.js';
-import { el, toast, modal, confirmBox } from './util.js';
+import { el, toast, modal, confirmBox, newest } from './util.js';
 import { firmId } from './state.js';
 
 const KINDS = [['purchase', 'Purchase bill'], ['salesOrder', 'Estimate / list'], ['sale', 'Sale']];
@@ -18,17 +18,30 @@ async function upload(kind, file, captureId = null) {
 }
 
 export async function captureView(root) {
-  let kind = localStorage.getItem('mk-capture-kind') || 'purchase';
+  let kind = 'purchase';
+  try { kind = localStorage.getItem('mk-capture-kind') || kind; } catch { /* storage blocked: the default kind */ }
   let reader = 'antigravity';
   try { reader = (await get('/settings/ai')).reader ?? reader; } catch { /* keep the default wording */ }
   const readerName = reader === 'gemma' ? 'Gemma 4' : 'Antigravity';
   let timer = null;
   const list = el('div', { class: 'stack' });
 
+  // The 2.5 s poll and a button's own refresh overlap: only the newest answer may draw the list (an older one would
+  // bring back a photo just discarded until the next poll).
+  const ticket = newest();
   async function refresh() {
     if (!list.isConnected) { clearTimeout(timer); return; }
+    const current = ticket();
     let items;
-    try { items = await get(`/${firmId()}/captures`); } catch (e) { list.replaceChildren(el('p', { class: 'issue err' }, e.message)); return; }
+    try { items = await get(`/${firmId()}/captures`); } catch (e) {
+      if (!current() || !list.isConnected) return;
+      list.replaceChildren(el('p', { class: 'issue err' }, e.message));
+      // Keep looking: a photo being read when the service blinked must still show up without leaving the page.
+      clearTimeout(timer);
+      timer = setTimeout(refresh, 10000);
+      return;
+    }
+    if (!current() || !list.isConnected) return;
     list.replaceChildren(items.length ? items.map(card) : el('p', { class: 'muted' }, 'No photos yet. Add a bill photo above.'));
     clearTimeout(timer);
     timer = setTimeout(refresh, items.some((c) => c.status === 'received' || c.status === 'extracting') ? 2500 : 10000);
@@ -38,8 +51,13 @@ export async function captureView(root) {
     const [label, tone] = STATUS[c.status] ?? [c.status, ''];
     const act = (text, fn, cls = '') => el('button', { class: 'btn small ' + cls, onclick: async () => { try { await fn(); refresh(); } catch (e) { toast(e.message, true); } } }, text);
     const addPage = el('input', { type: 'file', accept: 'image/*', hidden: true, onchange: async (e) => {
-      for (const f of e.target.files) await upload(kind, f, c.id);
-      toast('Page added; reading the whole bill again');
+      const files = [...e.target.files];
+      e.target.value = ''; // the same photo can be chosen again after a failed upload
+      let added = 0;
+      for (const f of files) {
+        try { await upload(kind, f, c.id); added++; } catch (x) { toast(`${f.name}: ${x.message}`, true); }
+      }
+      if (added) toast(added > 1 ? `${added} pages added; reading the whole bill again` : 'Page added; reading the whole bill again');
       refresh();
     } });
     const busy = c.status === 'received' || c.status === 'extracting';
@@ -116,7 +134,7 @@ export async function captureView(root) {
 
   root.replaceChildren(
     el('div', { class: 'row spread' }, el('div', {}, el('h1', {}, 'Scan bills'), el('div', { class: 'muted' }, `${readerName} reads the photo; you check it beside the picture and save. Nothing is saved to HQ automatically.`)),
-      el('label', { class: 'field' }, el('span', {}, 'These photos are'), el('select', { onchange: (e) => { kind = e.target.value; localStorage.setItem('mk-capture-kind', kind); } },
+      el('label', { class: 'field' }, el('span', {}, 'These photos are'), el('select', { onchange: (e) => { kind = e.target.value; try { localStorage.setItem('mk-capture-kind', kind); } catch { /* remembered for this visit only */ } } },
         KINDS.map(([k, t]) => el('option', { value: k, selected: k === kind }, t))))),
     el('div', { style: { margin: '12px 0' } }, drop, picker), list);
   document.addEventListener('paste', function onPaste(e) {

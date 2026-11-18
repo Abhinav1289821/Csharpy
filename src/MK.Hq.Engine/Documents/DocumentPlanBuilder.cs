@@ -265,18 +265,18 @@ public static class DocumentPlanBuilder
         var tt = d.Type.Name;
         string reference;
         if (d.Kind == DocumentKind.Purchase && d.Request.Supplier is { } s)
-            reference = $" Supp. Bill No. {s.Number.Trim()} Dt. {s.Date.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture)}";
+            // Typed text is escaped: a supplier bill "INV{12}" must not be read as a plan variable by the template.
+            reference = $" Supp. Bill No. {Escape(s.Number.Trim())} Dt. {s.Date.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture)}";
         else
-            reference = $" Bill No {d.Type.Series}/{(number is Ref r ? "{" + r.Name + "}" : Convert.ToString(number, CultureInfo.InvariantCulture))}";
-        if (partyRow) return new Interp(Escape(tt) + EscapeKeepingVars(reference));
+            reference = $" Bill No {Escape(d.Type.Series)}/{(number is Ref r ? "{" + r.Name + "}" : Convert.ToString(number, CultureInfo.InvariantCulture))}";
+        if (partyRow) return new Interp(Escape(tt) + reference);
         var town = d.Settlement == Settlement.Bank ? d.AccountTown : d.Snapshot.Town;
         var name = d.Settlement == Settlement.Bank ? d.Head.Name : d.Snapshot.Name;
-        var text = Escape(tt) + (d.Kind.IsInward() ? " From " : " To ") + Escape(name) + (town.Length > 0 ? ", " : " ") + Escape(town) + EscapeKeepingVars(reference);
+        var text = Escape(tt) + (d.Kind.IsInward() ? " From " : " To ") + Escape(name) + (town.Length > 0 ? ", " : " ") + Escape(town) + reference;
         return new Interp(text);
     }
 
     private static string Escape(string s) => s.Replace("{", "(").Replace("}", ")");
-    private static string EscapeKeepingVars(string s) => s;
 
     public static IEnumerable<PlanStep> Audit(ResolvedDocument d, object docId, int revision, IReadOnlyList<long?>? reopenedLineIds = null)
     {

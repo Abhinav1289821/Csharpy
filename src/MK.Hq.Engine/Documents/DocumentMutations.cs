@@ -42,11 +42,13 @@ public sealed class DocumentMutations(
     public async Task<MutationReceipt> DeleteAsync(string firmId, DeleteRequest request, CancellationToken ct = default)
     {
         var firm = firms.Get(firmId);
-        var profile = await profiles.GetAsync(firm, ct);
         var receipt = await coordinator.RunAsync(new WriteRequest<MutationReceipt>(
             firm, request.OperationId, "document.delete", DocumentService.RequestHash(request), [request.DocumentId],
             async session =>
             {
+                // Settings read inside the write transaction: a cached copy could be up to 30 s old, and the plan-hash check
+                // could not then notice a settings change (round-off type, charge accounts) made since the review.
+                var profile = await FirmProfiles.LoadAsync(firm, session);
                 var (plan, state, change) = await PlanDeleteAsync(session, profile, request.DocumentId);
                 Guard.Require(Combine(state.ContentHash, plan.Hash) == request.ExpectedHash, "REVIEW_CHANGED",
                     "This document or its payments changed since you reviewed the deletion. Review it again.", FailureKind.Conflict);
@@ -113,11 +115,13 @@ public sealed class DocumentMutations(
     public async Task<MutationReceipt> AmendAsync(string firmId, AmendRequest request, CancellationToken ct = default)
     {
         var firm = firms.Get(firmId);
-        var profile = await profiles.GetAsync(firm, ct);
         var receipt = await coordinator.RunAsync(new WriteRequest<MutationReceipt>(
             firm, request.OperationId, "document.amend", DocumentService.RequestHash(request), [request.DocumentId],
             async session =>
             {
+                // Settings read inside the write transaction: a cached copy could be up to 30 s old, and the plan-hash check
+                // could not then notice a settings change (round-off type, charge accounts) made since the review.
+                var profile = await FirmProfiles.LoadAsync(firm, session);
                 var (plan, state, resolved, change) = await PlanAmendAsync(session, profile, request);
                 Guard.Require(Combine(state.ContentHash, plan.Hash) == request.ExpectedHash, "REVIEW_CHANGED",
                     "This document, its payments or HQ's masters changed since you reviewed the correction. Review it again.", FailureKind.Conflict);
@@ -142,10 +146,23 @@ public sealed class DocumentMutations(
         var kept = request.LineIds.Where(x => x is not null).Select(x => x!.Value).ToList();
         Guard.Require(kept.All(existing.Contains) && kept.Distinct().Count() == kept.Count, "INVALID_LINES", "A line id does not belong to this document");
 
+        // Order links of a correction come from the stored lines (below), never from the request: the client echoes each
+        // kept line's orderLineId without the source order, which the resolver refuses, and the resolver would also count
+        // this sale's own supplied quantity against the order. The final SQL check below guards the order quantities.
         var resolved = await resolver.Excluding(request.DocumentId).ResolveAsync(s, profile, request.Document with
         {
             NumberSuffix = request.Document.NumberSuffix ?? DocumentResolver.Text(state.Header, "TExtn"),
+            SourceOrderId = null,
+            Lines = request.Document.Lines.Select(l => l with { OrderLineId = null }).ToList(),
         });
+        if (kind == DocumentKind.SalesOrder)
+        {
+            // Lines that sales were already made from may not be removed (as delete refuses a supplied order).
+            var removed = existing.Except(kept).ToArray();
+            var supplied = removed.Length == 0 ? 0
+                : await s.ScalarAsync<int>("SELECT COUNT(*) FROM dbo.IQDoc_Delv WITH (UPDLOCK, HOLDLOCK) WHERE OrdDelv_Id IN @ids", new { ids = removed });
+            Guard.Require(supplied == 0, "HQ_ORDER_SUPPLIED", "Sales were already made from a line you removed; correct or delete those sales first", FailureKind.Conflict);
+        }
         // Keep the original order links of kept sale lines.
         if (kind == DocumentKind.Sale)
         {
@@ -162,7 +179,7 @@ public sealed class DocumentMutations(
         var number = state.Number;
         var steps = new List<PlanStep>
         {
-            new VerifyStep("Document unchanged since review", "SELECT ModifyCnt FROM dbo.IQDoc_Header WHERE Doc_Id=@id", new Args().Set("id", docId),
+            new VerifyStep("Document unchanged since review", "SELECT ISNULL(ModifyCnt,0) FROM dbo.IQDoc_Header WHERE Doc_Id=@id", new Args().Set("id", docId),
                 state.ModifyCnt, "REVIEW_CHANGED", "The document was edited elsewhere"),
         };
 
@@ -217,6 +234,14 @@ public sealed class DocumentMutations(
                 IF EXISTS (SELECT 1 FROM dbo.IQOrd_Detail o WHERE o.OrdDltdID IN (SELECT OrdDelv_Id FROM dbo.IQDoc_Delv WHERE Doc_ID=@id)
                   AND o.Qty < (SELECT SUM(d.Qty) FROM dbo.IQDoc_Delv d WHERE d.OrdDelv_Id=o.OrdDltdID))
                   RAISERROR('MK:HQ_ORDER_QUANTITY_EXCEEDED|The corrected sale supplies more than its sales order', 16, 1);
+                """, new Args().Set("id", docId)));
+        if (kind == DocumentKind.SalesOrder)
+            steps.Add(new SqlStep("Supplied order lines still cover their sales", """
+                IF EXISTS (SELECT 1 FROM dbo.IQOrd_Detail o WHERE o.Doc_ID=@id
+                  AND EXISTS (SELECT 1 FROM dbo.IQDoc_Delv d WHERE d.OrdDelv_Id=o.OrdDltdID)
+                  AND (o.Qty < (SELECT SUM(d.Qty) FROM dbo.IQDoc_Delv d WHERE d.OrdDelv_Id=o.OrdDltdID)
+                    OR EXISTS (SELECT 1 FROM dbo.IQDoc_Delv d WHERE d.OrdDelv_Id=o.OrdDltdID AND (d.Item_ID<>o.Item_ID OR d.UnitID<>o.UnitID))))
+                  RAISERROR('MK:HQ_ORDER_SUPPLIED|Sales were already made from this order: a supplied line cannot drop below what was sold or change its item', 16, 1);
                 """, new Args().Set("id", docId)));
 
         steps.AddRange(DocumentPlanBuilder.Audit(resolved, docId, state.ModifyCnt, request.LineIds));

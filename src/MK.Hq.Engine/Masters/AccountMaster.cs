@@ -52,14 +52,10 @@ public sealed record AccountReceipt(string OperationId, long AccountId, string N
 /// </summary>
 public sealed class AccountMasterService(FirmRegistry firms, WriteCoordinator coordinator, Catalogue catalogue)
 {
-    /// <summary>FrmAccounts' state list (the captions HQ stores; no 28 or 38).</summary>
+    /// <summary>FrmAccounts' state list (the captions HQ stores; no 28 or 38). Built from <see cref="Gstin.States"/>, the one
+    /// copy of HQ's drop-down, so the account screen and the bill's party state can never spell a state differently.</summary>
     public static readonly IReadOnlyList<string> States =
-    [
-        "01-Jammu & Kashmir", "02-Himachal Pradesh", "03-Punjab", "04-Chandigarh", "05-Uttarakhand", "06-Haryana", "07-Delhi", "08-Rajasthan", "09-Uttar Pradesh", "10-Bihar",
-        "11-Sikkim", "12-Arunachal Pradesh", "13-Nagaland", "14-Manipur", "15-Mizoram", "16-Tripura", "17-Meghalaya", "18-Assam", "19-West Bengal", "20-Jharkhand",
-        "21-Odisha", "22-Chhattisgarh", "23-Madhya Pradesh", "24-Gujarat", "25-Daman & Diu", "26-Dadra & Nagar Haveli", "27-Maharashtra", "29-Karnataka", "30-Goa", "31-Lakshdweep",
-        "32-Kerala", "33-Tamil Nadu", "34-Pondicherry", "35-Andaman & Nicobar Islands", "36-Telangana", "37-Andhra Pradesh", "97-Other Territory",
-    ];
+        Gstin.States.OrderBy(s => s.Key, StringComparer.Ordinal).Select(s => $"{s.Key}-{s.Value}").ToList();
 
     /// <summary>HQ writes Ent_Uid 1 on accounts whoever is logged in (ClsAccounts.Insert_Accmst).</summary>
     private const int HqAccountUser = 1;
@@ -229,8 +225,8 @@ public sealed class AccountMasterService(FirmRegistry firms, WriteCoordinator co
 
         // ---- address: rebuilt from the form (HQ reloads every box with .Trim(); blanks are " " or "" per box).
         object? A(string column) => storedAddress?[column];
-        string Box(string? typed, string column) => editing && typed is null ? HqForm.Reloaded(A(column)) : HqForm.Spaced(HqForm.Text(typed, column, 100));
-        string TrimBox(string? typed, string column) => editing && typed is null ? HqForm.ReloadedTrimmed(A(column)) : HqForm.Trimmed(HqForm.Text(typed, column, 100));
+        string Box(string? typed, string column) => editing && typed is null ? HqForm.Reloaded(A(column)) : HqForm.Spaced(AddressBox(typed, column));
+        string TrimBox(string? typed, string column) => editing && typed is null ? HqForm.ReloadedTrimmed(A(column)) : HqForm.Trimmed(AddressBox(typed, column));
         var billMode = editing ? (int)Stored("Act_BillMode") : 1;
         var adr = new Args()
             .Set("Act_Id", idArg).Set("person", Box(r.Person, "person")).Set("Add_Line1", Box(r.Address1, "Add_Line1")).Set("Add_Line2", Box(r.Address2, "Add_Line2"))
@@ -254,10 +250,13 @@ public sealed class AccountMasterService(FirmRegistry firms, WriteCoordinator co
         steps.Add(new CallStep("Address, GST and state", "IQAccAdr_insert", adr));
 
         // ---- the contact grid: always ten rows (blank ones included), rewritten on every save.
-        var contacts = editing
-            ? (await s.QueryAsync<(int Ln, string? Degn, string? Name, string? Phone, string? Email)>("SELECT CAST(LnNo AS int), ActDegn, ActName, ActPhone, ActEmailID FROM dbo.IQAccOthers WHERE actID=@id", new { id = r.AccountId }))
-                .ToDictionary(c => c.Ln)
+        var storedContacts = editing
+            ? await s.QueryAsync<(int Ln, string? Degn, string? Name, string? Phone, string? Email)>("SELECT CAST(LnNo AS int), ActDegn, ActName, ActPhone, ActEmailID FROM dbo.IQAccOthers WHERE actID=@id", new { id = r.AccountId })
             : [];
+        // IQAccOthers has no key: two rows on one grid line (or a line beyond HQ's ten) cannot be rebuilt as HQ's grid would.
+        Guard.Supported(storedContacts.GroupBy(c => c.Ln).All(g => g.Count() == 1) && storedContacts.All(c => c.Ln is >= 0 and < 10), "HQ_ACCOUNT_CONTACTS_UNSUPPORTED",
+            "This account's contact grid in HQ has repeated or extra rows; change the account in HQ");
+        var contacts = storedContacts.ToDictionary(c => c.Ln);
         steps.Add(new SqlStep("Replace contacts", "DELETE FROM dbo.IQAccOthers WHERE actID=@id", new Args().Set("id", idArg)));
         for (var ln = 0; ln < 10; ln++)
         {
@@ -276,7 +275,8 @@ public sealed class AccountMasterService(FirmRegistry firms, WriteCoordinator co
         var settled = openingRows.Where(o => o.Links > 0).ToList();
         if (settled.Count == 0)
         {
-            steps.Add(new SqlStep("Replace opening row", "DELETE FROM dbo.IQDayBook WHERE Act_ID=@id AND Div_no=0 AND trdate<@start", new Args().Set("id", idArg).Set("start", fyStart)));
+            // Same condition as the read above (ISNULL): a NULL-Div_no opening row left behind would double the opening balance.
+            steps.Add(new SqlStep("Replace opening row", "DELETE FROM dbo.IQDayBook WHERE Act_ID=@id AND ISNULL(Div_no,0)=0 AND trdate<@start", new Args().Set("id", idArg).Set("start", fyStart)));
             steps.Add(new CallStep("Opening balance row", "IQdaybook_insert", OpeningRow(idArg, opening, side, "opbal", fyStart)));
         }
         else
@@ -286,6 +286,10 @@ public sealed class AccountMasterService(FirmRegistry firms, WriteCoordinator co
             Guard.Supported(settled.Count == 1 && openingRows.Count == 1, "HQ_ACCOUNT_OPENING_SETTLED", "This account's opening balance is split and settled; change it in HQ");
             Guard.Require(opening >= settled[0].Allocated, "HQ_ACCOUNT_OPENING_SETTLED",
                 $"{Money.Text(settled[0].Allocated)} of the opening balance is already settled by payments; it cannot go below that");
+            // Flipping Dr/Cr would leave a receipt settled against a row on its own side, which every later edit of either
+            // document then refuses ("allocation directions disagree").
+            Guard.Require(settled[0].Allocated == 0 || side == (storedOpening >= 0 ? 'D' : 'C'), "HQ_ACCOUNT_OPENING_SETTLED",
+                "Payments are settled against this opening balance, so its Dr/Cr side cannot change; release those settlements first");
             if (opening != Math.Abs(storedOpening) || side != (storedOpening >= 0 ? 'D' : 'C'))
                 warnings.Add("Payments are settled against this opening balance; MK keeps them attached (HQ itself would detach them).");
             steps.Add(new SqlStep("Opening balance row (kept, settlements stay attached)", "UPDATE dbo.IQDayBook SET AMOUNT=@amount, TYPE=@side WHERE SR_NO=@sr",
@@ -308,6 +312,22 @@ public sealed class AccountMasterService(FirmRegistry firms, WriteCoordinator co
 
         var previous = editing ? await s.ScalarAsync<string?>(WriteEvidence.AccountFingerprintSql, new { id = r.AccountId }) : null;
         return new Planned(new WritePlan(editing ? $"Change account {name.Trim()}" : $"New {r.Type.ToLowerInvariant()} {name.Trim()}", steps), code, state, warnings, previous, name.Trim());
+    }
+
+    /// <summary>FrmAccounts' MaxLength for each address box. The table columns are wider (100), but every bill copies the town,
+    /// phone and mobile into IQCash_TRAN / the bill header, whose fields hold 50: a 60-character town accepted here would
+    /// make every later bill for this party fail. HQ's own form never lets such a value in.</summary>
+    private static readonly IReadOnlyDictionary<string, (string Label, int Max)> Boxes = new Dictionary<string, (string, int)>
+    {
+        ["person"] = ("contact person", 35), ["Add_Line1"] = ("address line 1", 60), ["Add_Line2"] = ("address line 2", 60),
+        ["Act_Town"] = ("town", 25), ["Act_District"] = ("district", 25), ["Act_PinNo"] = ("PIN code", 10), ["Act_Ph1"] = ("phone", 35),
+        ["Act_Cell"] = ("mobile", 12), ["Act_Email"] = ("e-mail", 100), ["Act_PAN"] = ("PAN", 25),
+    };
+
+    public static string AddressBox(string? typed, string column)
+    {
+        var (label, max) = Boxes[column];
+        return HqForm.Text(typed, label, max);
     }
 
     private static Args OpeningRow(object accountId, object amount, object side, string vtype, DateTime fyStart) => new Args()
