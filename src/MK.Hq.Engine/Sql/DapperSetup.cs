@@ -19,13 +19,13 @@ public static class DapperSetup
     private sealed class DateOnlyHandler : SqlMapper.TypeHandler<DateOnly>
     {
         public override DateOnly Parse(object value) => DateOnly.FromDateTime(Convert.ToDateTime(value));
-        public override void SetValue(IDbDataParameter parameter, DateOnly value) { parameter.DbType = DbType.Date; parameter.Value = value.ToDateTime(TimeOnly.MinValue); }
+        public override void SetValue(IDbDataParameter parameter, DateOnly value) { parameter.DbType = DbType.DateTime; parameter.Value = value.ToDateTime(TimeOnly.MinValue); }
     }
 
     private sealed class NullableDateOnlyHandler : SqlMapper.TypeHandler<DateOnly?>
     {
         public override DateOnly? Parse(object value) => value is null or DBNull ? null : DateOnly.FromDateTime(Convert.ToDateTime(value));
-        public override void SetValue(IDbDataParameter parameter, DateOnly? value) { parameter.DbType = DbType.Date; parameter.Value = value?.ToDateTime(TimeOnly.MinValue) ?? (object)DBNull.Value; }
+        public override void SetValue(IDbDataParameter parameter, DateOnly? value) { parameter.DbType = DbType.DateTime; parameter.Value = value?.ToDateTime(TimeOnly.MinValue) ?? (object)DBNull.Value; }
     }
 
     private sealed class CharHandler : SqlMapper.TypeHandler<char>

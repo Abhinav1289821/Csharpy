@@ -17,7 +17,7 @@ async function upload(kind, file, captureId = null) {
   return data;
 }
 
-export async function captureView(root) {
+export async function captureView(root, reviewId) {
   let kind = 'purchase';
   try { kind = localStorage.getItem('mk-capture-kind') || kind; } catch { /* storage blocked: the default kind */ }
   let reader = 'antigravity';
@@ -42,6 +42,11 @@ export async function captureView(root) {
       return;
     }
     if (!current() || !list.isConnected) return;
+    const requested = reviewId && items.find((capture) => capture.id === reviewId);
+    if (requested?.status === 'ready' && requested.draftId && list.isConnected) {
+      location.hash = `#/draft/${requested.draftId}`;
+      return;
+    }
     list.replaceChildren(items.length ? items.map(card) : el('p', { class: 'muted' }, 'No photos yet. Add a bill photo above.'));
     clearTimeout(timer);
     timer = setTimeout(refresh, items.some((c) => c.status === 'received' || c.status === 'extracting') ? 2500 : 10000);
@@ -92,6 +97,37 @@ export async function captureView(root) {
   }
 
   const picker = el('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, onchange: (e) => { addFiles([...e.target.files]); e.target.value = ''; } });
+  const scanButton = el('button', { class: 'btn', onclick: scan }, 'Scan from scanner');
+  async function scan() {
+    const firm = firmId();
+    const scanKind = kind;
+    scanButton.disabled = true;
+    scanButton.textContent = 'Looking for scanner…';
+    try {
+      const scanners = await get(`/${firm}/captures/scanners`);
+      if (!scanners.length) throw new Error('No scanner found. Check that it is powered on and connected to this PC.');
+      let deviceId = scanners[0].id;
+      if (scanners.length > 1) {
+        const picker = el('select', { 'aria-label': 'Scanner' }, scanners.map((scanner) => el('option', { value: scanner.id }, scanner.name)));
+        deviceId = await modal((close) => [
+          el('h1', {}, 'Choose a scanner'), picker,
+          el('div', { class: 'row', style: { justifyContent: 'flex-end' } },
+            el('button', { class: 'btn', onclick: () => close() }, 'Cancel'),
+            el('button', { class: 'btn primary', onclick: () => close(picker.value) }, 'Scan'))
+        ]);
+        if (!deviceId) return;
+      }
+      scanButton.textContent = 'Scanning…';
+      await post(`/${firm}/captures/scan?kind=${encodeURIComponent(scanKind)}`, { deviceId });
+      toast(`Page scanned and sent to ${readerName} for review`);
+      refresh();
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      scanButton.disabled = false;
+      scanButton.textContent = 'Scan from scanner';
+    }
+  }
   const drop = el('div', { class: 'panel', style: { border: '1.5px dashed var(--line)', textAlign: 'center', padding: '24px' },
     ondragover: (e) => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; },
     ondragleave: () => (drop.style.borderColor = 'var(--line)'),
@@ -100,6 +136,7 @@ export async function captureView(root) {
     el('div', { class: 'muted' }, 'One bill per photo. JPEG, PNG, BMP or TIFF; sideways pages are turned upright automatically.'),
     el('div', { class: 'row', style: { justifyContent: 'center', marginTop: '10px' } },
       el('button', { class: 'btn primary', onclick: () => picker.click() }, 'Choose photos'),
+      scanButton,
       el('button', { class: 'btn', onclick: webcam }, 'Use camera'),
       el('button', { class: 'btn', onclick: phone }, 'Send from phone (QR)')));
 

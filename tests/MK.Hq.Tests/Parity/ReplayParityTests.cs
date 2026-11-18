@@ -73,7 +73,7 @@ public sealed class ReplayParityTests(ITestOutputHelper output)
     public async Task Engine_writes_what_HQ_writes(string firmId, string database, string backup, int perProfile)
     {
         await ScratchDatabase.RestoreAsync(database, backup);
-        await using var provider = ScratchDatabase.Engine(firmId, database);
+        await using var provider = await ScratchDatabase.EngineAsync(firmId, database);
         var documents = provider.GetRequiredService<DocumentService>();
         await using var cn = new SqlConnection(TestDatabase.ConnectionString(database));
 

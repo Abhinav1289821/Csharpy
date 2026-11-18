@@ -103,6 +103,13 @@ public static class CaptureEndpoints
     {
         var c = firm.MapGroup("/captures");
         c.MapGet("", (string firm, CaptureStore store) => store.List(firm));
+        c.MapGet("/scanners", (WindowsScanner scanner, CancellationToken ct) => scanner.ListAsync(ct));
+        c.MapPost("/scan", async (string firm, string kind, ScannerSelection body, WindowsScanner scanner, CaptureService s, FirmRegistry firms, CancellationToken ct) =>
+        {
+            firms.Get(firm);
+            Guard.Require(CaptureService.Kinds.Contains(kind), "CAPTURE_KIND", "Choose purchase, sale or estimate");
+            return s.Add(firm, kind, "scanner", await scanner.ScanAsync(body.DeviceId, ct));
+        });
         c.MapPost("", async (string firm, string kind, HttpRequest req, CaptureService s, CancellationToken ct) => s.Add(firm, kind, "desktop", await Body(req, ct)));
         c.MapGet("/{id}", (string firm, string id, CaptureStore store) => store.Get(id) is { } r && r.Firm == firm ? Results.Ok(r) : Results.NotFound());
         c.MapGet("/{id}/pages/{page:int}", (string firm, string id, int page, CaptureStore store) =>

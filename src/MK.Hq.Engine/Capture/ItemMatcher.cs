@@ -50,13 +50,14 @@ public sealed partial class ItemMatcher
         if (ranked.Count == 0) return new LineMatch([], null, "no similar item in HQ");
         var best = ranked[0];
         var second = ranked.Count > 1 ? ranked[1].Score : 0;
-        var conflict = best.Notes.Any(n => n.StartsWith("size differs", StringComparison.Ordinal));
+        var conflict = best.Notes.Any(n => n.StartsWith("size differs", StringComparison.Ordinal)
+            || n.StartsWith("different product", StringComparison.Ordinal) || n.StartsWith("different material", StringComparison.Ordinal));
         var known = best.Notes.Any(n => n.StartsWith("on this party", StringComparison.Ordinal));
         // A party's usual item is taken on a smaller lead, but only when the words fit it as well as anything else.
         var fits = best.Notes.Contains(BestWording);
         var chosen = !conflict && ((best.Score >= 0.72 && best.Score - second >= 0.12) || (known && fits && best.Score >= 0.5 && best.Score - second >= 0.08)) ? best : null;
         return new LineMatch(ranked, chosen,
-            chosen is null ? (conflict ? "size differs; choose" : "several possible items; choose") : known ? "usual item from this party" : "clear best match");
+            chosen is null ? (conflict ? "specification differs; choose" : "several possible items; choose") : known ? "usual item from this party" : "clear best match");
     }
 
     private static readonly Regex ChargeWords = new(@"\b(p\s*&\s*f|c\s*&\s*f|packing|packaging|forwarding|freight|transport|transportation|cartage|hamali|loading|unloading|courier|delivery charge)", RegexOptions.IgnoreCase);
@@ -115,12 +116,12 @@ public sealed partial class ItemMatcher
             // Written in inches, catalogued in millimetres (or the other way round): compare via nominal sizes.
             if (spec.Inch is { } qi && e.Spec.Inch is null && e.Spec.Mm is { } im && NominalMm.TryGetValue(qi, out var mms))
             {
-                if (mms.Contains(im)) score += 0.08;
+                if (NominalMatches(qi, im, queryMaterials, mms)) score += 0.08;
                 else { score *= 0.3; notes.Add($"size differs: written {qi}, item is {im}"); }
             }
             else if (spec.Mm is { } qm && spec.Inch is null && e.Spec.Mm is null && e.Spec.Inch is { } ii && NominalMm.TryGetValue(ii, out var mms2))
             {
-                if (mms2.Contains(qm)) score += 0.08;
+                if (NominalMatches(ii, qm, queryMaterials, mms2)) score += 0.08;
                 else { score *= 0.3; notes.Add($"size differs: written {qm}, item is {ii}"); }
             }
             if (line.Hsn is { Length: >= 4 } h && e.Item.Hsn.Length >= 4 && h[..4] == e.Item.Hsn[..4]) score += 0.04;
@@ -129,11 +130,11 @@ public sealed partial class ItemMatcher
             // A product's type outweighs brand words: an "elbow" line never becomes a pipe because both say PRINCE.
             var itemTypes = TypeWords(e.Words);
             var penalty = 1.0;
-            if (queryTypes.Count > 0 && itemTypes.Count > 0 && !queryTypes.Overlaps(itemTypes))
+            if (queryTypes.Count > 0 && !queryTypes.Overlaps(itemTypes))
             {
-                penalty = 0.45;
+                penalty = 0.15;
                 score *= penalty;
-                notes.Add($"different product: {string.Join("/", itemTypes)} vs {string.Join("/", queryTypes)}");
+                notes.Add($"different product: {(itemTypes.Count == 0 ? "type not established" : string.Join("/", itemTypes))} vs {string.Join("/", queryTypes)}");
             }
             // So does the material: a UPVC tee is not a CPVC tee, however alike the words look.
             var itemMaterials = e.Words.Where(Materials.Contains).ToHashSet();
@@ -185,6 +186,24 @@ public sealed partial class ItemMatcher
 
     /// <summary>Pipe/fitting materials; each is a different product line with its own sizes and prices.</summary>
     private static readonly HashSet<string> Materials = ["upvc", "cpvc", "pvc", "gi", "swr", "ppr", "hdpe", "ms"];
+
+    // Shop trade dimensions differ by material; e.g. 1 inch UPVC is 25 mm, PVC is 32 mm.
+    // Keep the broader engineering table only for materials without an established shop rule.
+    private static bool NominalMatches(string inch, string mm, HashSet<string> materials, string[] fallback)
+    {
+        var pressure = materials.Overlaps(["upvc", "cpvc", "gi"]);
+        var drainage = materials.Overlaps(["pvc", "swr"]);
+        if (!pressure && !drainage) return fallback.Contains(mm);
+        var expected = inch switch
+        {
+            "0.5 inch" => pressure ? 15 : 20, "0.75 inch" => pressure ? 20 : 25,
+            "1 inch" => pressure ? 25 : 32, "1.25 inch" => pressure ? 32 : 40,
+            "1.5 inch" => pressure ? 40 : 50, "2 inch" => pressure ? 50 : 63,
+            "2.5 inch" => 75, "3 inch" => 90, "4 inch" => 110, "5 inch" => 140, "6 inch" => 160,
+            _ => 0,
+        };
+        return expected == 0 ? fallback.Contains(mm) : mm == expected + " mm";
+    }
 
     private static HashSet<string> TypeWords(IEnumerable<string> words) =>
         words.Select(w => w switch { "ftaw" => "fta", "mtaw" => "mta", "bushing" => "bush", "coupler" => "coupling", "adaptor" => "adapter", _ => w })

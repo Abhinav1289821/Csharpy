@@ -19,7 +19,7 @@ public sealed class ScratchMbm : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await ScratchDatabase.RestoreAsync(Database, "ISTMBM26.bak");
-        Engine = ScratchDatabase.Engine("mbm", Database);
+        Engine = await ScratchDatabase.EngineAsync("mbm", Database);
     }
     public async Task DisposeAsync() => await Engine.DisposeAsync();
 }
@@ -172,7 +172,7 @@ public sealed class WorkflowTests(ScratchMbm fx, ITestOutputHelper output) : ICl
     [Fact]
     public async Task Numbers_never_collide_with_HQ_or_another_terminal()
     {
-        await using var second = ScratchDatabase.Engine("mbm", ScratchMbm.Database);
+        await using var second = await ScratchDatabase.EngineAsync("mbm", ScratchMbm.Database);
         const string duplicateSql = "SELECT COUNT(*) FROM (SELECT TNo FROM dbo.IQDoc_Header WHERE TSeries='CS' GROUP BY TNo, ISNULL(TExtn,'') HAVING COUNT(*)>1) d";
         int baseline;
         await using (var pre = Sql()) baseline = await pre.ExecuteScalarAsync<int>(duplicateSql); // HQ's own numbers, suffix included, are unique at the start

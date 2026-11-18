@@ -343,10 +343,17 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     busy = true;
     saveBtn.disabled = true;
     try {
+      const reviewedHash = keyboardReview ? preview?.hash : null;
       previewKey = '';
       await refreshPreview();
       // F10 that cannot save says why (no items yet, or what HQ refused) instead of doing nothing.
       if (!preview) { toast(status.querySelector('.issue.err')?.textContent || (filled().length ? 'This bill cannot be saved yet' : 'Add items to the bill first'), true); return; }
+      if (keyboardReview && reviewedHash !== preview.hash) {
+        toast('Review the updated bill, then press Enter to save.');
+        saveBtn.disabled = false;
+        saveBtn.focus({ preventScroll: true });
+        return;
+      }
       if (!original && !KINDS[doc.kind].order && doc.paymentMode === 0 && !doc.party.name.trim()) { toast('Enter the customer name', true); header.querySelector('.lookup input')?.focus(); return; }
       const req = request();
       let receipt;
@@ -431,7 +438,9 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
   }
 
   // ---------------------------------------------------------------- layout
-  const saveBtn = el('button', { class: 'btn primary', onclick: save }, original ? 'Save changes (F10)' : 'Save to HQ (F10)');
+  const keyboardReview = Boolean(draftId && (doc.assistant || doc.capture));
+  const saveBtn = el('button', { class: 'btn primary', onclick: save }, original ? 'Save changes (F10)' :
+    keyboardReview ? 'Save to HQ (Enter)' : 'Save to HQ (F10)');
   root.replaceChildren(
     el('div', { class: 'page-head' },
       el('div', {}, el('h1', {}, original ? `Edit ${original.summary.reference}` : doc.sourceOrderId ? 'Sale from order' : KINDS[doc.kind].title),
@@ -453,15 +462,24 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
     const pages = Math.max(1, cap.pages ?? 1);
     let zoom = 1;
     const imgs = Array.from({ length: pages }, (_, n) => el('img', { src: pageUrl(cap.id, n + 1), alt: `Bill page ${n + 1}`, style: { width: '100%', display: 'block', background: '#fff', marginBottom: '6px' } }));
-    const frame = el('div', { style: { maxHeight: '36vh', overflow: 'auto', borderRadius: '6px', border: '1px solid var(--line)' } }, imgs);
+    const frame = el('div', { class: 'bill-photo-frame' }, imgs);
     const setZoom = (z) => { zoom = z; imgs.forEach((i) => (i.style.width = `${zoom * 100}%`)); };
-    return el('details', { class: 'panel', open: true, style: { marginTop: '12px' } },
-      el('summary', {}, `Bill photo · read by ${cap.model}`, cap.printedTotal != null ? ` · printed total ₹${money(cap.printedTotal)}` : ''),
+    const key = 'mk-hq-bill-photo-collapsed';
+    let open = true;
+    try { open = localStorage.getItem(key) !== '1'; } catch { /* private mode */ }
+    const label = el('span', {}, open ? 'Hide bill image' : 'Show bill image');
+    const details = el('details', { class: 'bill-photo', open, ontoggle: () => {
+      label.textContent = details.open ? 'Hide bill image' : 'Show bill image';
+      try { localStorage.setItem(key, details.open ? '0' : '1'); } catch { /* private mode */ }
+    } },
+      el('summary', {}, label, el('span', { class: 'muted' }, cap.model ? ` · ${cap.model}` : '',
+        cap.printedTotal != null ? ` · printed total ₹${money(cap.printedTotal)}` : '')),
       el('div', { class: 'row', style: { margin: '6px 0' } }, el('button', { class: 'btn small', onclick: () => setZoom(Math.max(0.5, zoom - 0.25)) }, '−'),
         el('button', { class: 'btn small', onclick: () => setZoom(Math.min(3, zoom + 0.25)) }, '+'),
         el('a', { class: 'btn small', href: pageUrl(cap.id, 1), target: '_blank' }, 'Open full size'),
         el('a', { class: 'btn small', href: '#/capture' }, 'All scans')),
-      frame,
+      frame);
+    return el('div', { class: 'panel bill-photo' }, details,
       (cap.warnings ?? []).length ? el('div', { style: { marginTop: '10px' } }, checklist(cap.warnings)) : null);
   }
 
@@ -470,6 +488,10 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
   const alive = el('span', { hidden: true });
   root.append(alive);
   const keys = (e) => {
+    if (e.altKey && !e.ctrlKey && !e.repeat && e.key.toLowerCase() === 'i' && alive.isConnected) {
+      const photo = root.querySelector('.bill-photo details');
+      if (photo) { e.preventDefault(); photo.open = !photo.open; }
+    }
     if (!alive.isConnected) return document.removeEventListener('keydown', keys);
     if (e.key === 'F10' || (e.ctrlKey && e.key.toLowerCase() === 's')) { e.preventDefault(); save(); }
   };
@@ -489,6 +511,13 @@ export async function billView(root, { kind = 'sale', amendId = null, draft = nu
   window.addEventListener('beforeunload', onUnload);
   renderHeader();
   renderLines();
-  refreshPreview();
+  const initialFocus = document.activeElement;
+  refreshPreview().then(() => {
+    if (keyboardReview && preview && saveBtn.isConnected &&
+      (document.activeElement === initialFocus || document.activeElement === document.body) &&
+      !(initialFocus?.matches('.as-compose textarea') && initialFocus.value.trim())) {
+      saveBtn.focus({ preventScroll: true });
+    }
+  });
   kept = draftId ? JSON.stringify(doc) : null; // a reopened draft left unchanged is not saved again
 }

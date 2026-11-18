@@ -14,6 +14,12 @@ using MK.Hq.Engine.Plans;
 using MK.Hq.Engine.Reports;
 using MK.Hq.Engine.Vouchers;
 
+if (args is ["--scanner-worker", .. var scannerArgs])
+{
+    Environment.ExitCode = WiaScannerWorker.Run(scannerArgs);
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
 var hq = builder.Configuration.GetSection("Hq").Get<HqOptions>() ?? new HqOptions();
 hq.DataDirectory = Path.GetFullPath(hq.DataDirectory, builder.Environment.ContentRootPath);
@@ -30,11 +36,15 @@ builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = 30 * 1024 * 
 var pairing = new PhonePairing(hq);
 builder.Services.AddSingleton(pairing);
 builder.Services.AddHostedService<CaptureWorker>();
+builder.Services.AddSingleton<WindowsScanner>();
 // The assistant: Google Antigravity (agy acp) with MK's tools served at /mcp.
 var agentOptions = builder.Configuration.GetSection("Agent").Get<MK.Hq.Api.Agent.AgentOptions>() ?? new MK.Hq.Api.Agent.AgentOptions();
 builder.Services.AddSingleton(agentOptions);
 builder.Services.AddSingleton<MK.Hq.Api.Agent.AgentHub>();
 builder.Services.AddSingleton<MK.Hq.Api.Agent.AgentTools>();
+builder.Services.AddSingleton<MK.Hq.Api.Agent.McpAccess>();
+builder.Services.AddSingleton<MK.Hq.Api.Agent.McpServer>();
+builder.Services.AddSingleton<MK.Hq.Api.Agent.ExternalBillingTools>();
 // Bill photos are read by Antigravity as well (the shop's Google sign-in, no API key); ReadPhotos=false keeps Gemma 4.
 if (agentOptions.ReadPhotos) builder.Services.AddSingleton<MK.Hq.Engine.Capture.IBillReader, MK.Hq.Api.Agent.AntigravityBillReader>();
 var mainUrls = builder.Configuration["urls"] ?? "http://127.0.0.1:47320";
@@ -254,12 +264,22 @@ firm.MapGet("/events", async (string firm, HttpContext ctx, FirmRegistry firms, 
     ctx.Response.Headers.CacheControl = "no-cache";
     var f = firms.Get(firm);
     string? last = null;
+    var online = false;
     while (!ct.IsCancellationRequested)
     {
         try
         {
             await using var s = await f.OpenAsync(ct);
-            var stamp = await s.ScalarAsync<string>(Catalogue.StampSql + " + '|' + (SELECT CONCAT(COUNT(*),'.',ISNULL(MAX(Doc_Id),0),'.',ISNULL(SUM(CAST(ModifyCnt AS bigint)),0)) FROM dbo.IQDoc_Header)");
+            const string documentStampSql = """
+                 + '|' + (SELECT CONVERT(varchar(40),COUNT(*))+'.'+CONVERT(varchar(40),ISNULL(MAX(Doc_Id),0))
+                 +'.'+CONVERT(varchar(40),ISNULL(SUM(CAST(ModifyCnt AS bigint)),0)) FROM dbo.IQDoc_Header)
+                """;
+            var stamp = await s.ScalarAsync<string>(Catalogue.StampSql + documentStampSql);
+            if (!online)
+            {
+                await ctx.Response.WriteAsync("event: online\ndata: {}\n\n", ct);
+                online = true;
+            }
             if (stamp != last)
             {
                 if (last is not null) await ctx.Response.WriteAsync($"event: changed\ndata: {{\"at\":\"{DateTime.UtcNow:O}\"}}\n\n", ct);
@@ -269,7 +289,13 @@ firm.MapGet("/events", async (string firm, HttpContext ctx, FirmRegistry firms, 
             await ctx.Response.Body.FlushAsync(ct);
         }
         catch (OperationCanceledException) { break; }
-        catch (HqException) { await ctx.Response.WriteAsync("event: offline\ndata: {}\n\n", ct); }
+        catch (HqException e)
+        {
+            online = false;
+            var state = e.Code == "HQ_UNAVAILABLE" ? "offline" : "feed-error";
+            await ctx.Response.WriteAsync($"event: {state}\ndata: {{}}\n\n", ct);
+            await ctx.Response.Body.FlushAsync(ct);
+        }
         try { await Task.Delay(TimeSpan.FromSeconds(3), ct); } catch (OperationCanceledException) { break; }
     }
 });

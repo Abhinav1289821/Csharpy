@@ -152,7 +152,7 @@ public sealed class DocumentReader
         await s.QueryAsync<DocumentSummary>($"""
             SELECT TOP (@take) CAST(h.Doc_Id AS bigint) DocumentId, CAST(h.Tt_Id AS int) TtId, RTRIM(ISNULL(t.Vouchtype,'')) Kind, RTRIM(ISNULL(t.Ttype,'')) TypeName,
               RTRIM(h.TSeries) Series, h.TNo Number, RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) Reference,
-              CAST(h.Doc_Date AS date) Date, CAST(ISNULL(h.Mode,0) AS int) Mode, CAST(ISNULL(h.HeadAct_ID,h.Act_ID) AS bigint) AccountId,
+              DATEADD(day,DATEDIFF(day,0,h.Doc_Date),0) Date, CAST(ISNULL(h.Mode,0) AS int) Mode, CAST(ISNULL(h.HeadAct_ID,h.Act_ID) AS bigint) AccountId,
               LTRIM(RTRIM(CASE WHEN h.Mode=1 OR c.Act_Name IS NULL OR LTRIM(c.Act_Name)='' THEN ISNULL(a.Act_Name,'') ELSE c.Act_Name END)) Party,
               LTRIM(RTRIM(ISNULL(c.Act_Town,''))) Town, CAST(ISNULL(h.Bill_Amt,0) AS decimal(19,2)) Amount,
               CAST(ISNULL((SELECT SUM(d.AMOUNT-ISNULL(d.BL_adjusted,0)) FROM dbo.IQDayBook d WHERE d.Doc_ID=h.Doc_Id AND d.Act_ID=h.HeadAct_ID AND d.TYPE IN ('D','C') AND h.Mode=1),0) AS decimal(19,2)) [Open],
@@ -238,7 +238,7 @@ public sealed class DocumentReader
         var contraOf = contra.ToDictionary(x => x.Sr, x => x.Contra);
         var settlements = await s.QueryAsync<SettlementView>("""
             SELECT CAST(o.SR_NO AS bigint) EntryId, CAST(o.Doc_ID AS bigint) DocumentId, RTRIM(ISNULL(o.Tseries,''))+'/'+CAST(ISNULL(o.Tno,0) AS varchar(12)) Reference,
-              CAST(o.trdate AS date) Date, CAST(a.Amount AS decimal(19,2)) Amount
+              DATEADD(day,DATEDIFF(day,0,o.trdate),0) Date, CAST(a.Amount AS decimal(19,2)) Amount
             FROM dbo.ADJUST a JOIN dbo.IQDayBook me ON me.SR_NO IN (a.Sr_No, a.Rel_Sr_No) AND me.Doc_ID=@id
             JOIN dbo.IQDayBook o ON o.SR_NO = CASE WHEN a.Sr_No=me.SR_NO THEN a.Rel_Sr_No ELSE a.Sr_No END
             ORDER BY o.trdate, o.SR_NO

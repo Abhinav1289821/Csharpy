@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using MK.Hq.Engine;
 using MK.Hq.Engine.Configuration;
+using MK.Hq.Engine.Hq;
 
 namespace MK.Hq.Tests.Support;
 
@@ -52,5 +53,20 @@ public static class ScratchDatabase
         services.AddLogging(b => b.SetMinimumLevel(LogLevel.Warning));
         services.AddHqEngine(options);
         return services.BuildServiceProvider();
+    }
+
+    public static async Task<ServiceProvider> EngineAsync(string firmId, string database, string? dataDirectory = null, Action<HqOptions>? configure = null)
+    {
+        var provider = Engine(firmId, database, dataDirectory, configure);
+        try
+        {
+            await provider.GetRequiredService<HqContract>().CheckAllAsync();
+            return provider;
+        }
+        catch
+        {
+            await provider.DisposeAsync();
+            throw;
+        }
     }
 }

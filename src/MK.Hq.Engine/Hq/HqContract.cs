@@ -29,7 +29,11 @@ public sealed class HqContract(HqOptions options, ProcedureCatalog catalog, Firm
     public async Task<ContractStatus> CheckAsync(HqFirm firm, bool acceptCurrent = false, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
-        try { return await CheckCoreAsync(firm, acceptCurrent, ct); }
+        try
+        {
+            _status.TryRemove(firm.Id, out _);
+            return await CheckCoreAsync(firm, acceptCurrent, ct);
+        }
         finally { _gate.Release(); }
     }
 

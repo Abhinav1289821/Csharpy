@@ -241,3 +241,8 @@ live change feed (the browser refreshes when anyone saves in HQ).
 Left to HQ, deliberately (none is used in either firm's data this year): HQ's split "Others" payment mode, sales and
 purchase returns, bill-wise opening balances, other account types (banks, expenses, groups), and items with two
 packs or several unit rows. Each is refused with a clear message rather than guessed.
+
+## Shop integrations
+
+- See [External MCP](docs/MCP.md) for the Antigravity scanner, item lookup, and bill posting workflow.
+- Run `tools\publish.ps1 -Staging` to build under `artifacts\publish` for a staged deployment.

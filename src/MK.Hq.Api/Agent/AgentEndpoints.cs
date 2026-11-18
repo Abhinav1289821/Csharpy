@@ -5,61 +5,19 @@ namespace MK.Hq.Api.Agent;
 
 public sealed record AgentScreenBody(string? Firm, string? Hash, string? Title);
 public sealed record AgentPromptBody(string Text, string? Firm, string? Hash, string? Title);
+public sealed record AgentAnswerBody(string Id, string? Answer);
 public sealed record AgentPermissionBody(string Id, string? OptionId);
 public sealed record AgentOptionBody(string ConfigId, string Value);
 
 /// <summary>
-/// /mcp: MK's tools for Antigravity (MCP over streamable HTTP, plain JSON replies; each request carries its chat's key).
+/// /mcp: MK's tools for embedded and external Antigravity clients over Streamable HTTP.
 /// /api/agent: the browser's side of the assistant: chats, messages, the live event stream, permission answers.
 /// </summary>
 public static class AgentEndpoints
 {
     public static void Map(WebApplication app, RouteGroupBuilder api)
     {
-        // ---- MCP server ----
-        app.MapPost("/mcp", async (HttpContext ctx, AgentHub hub, AgentTools tools, CancellationToken ct) =>
-        {
-            var header = ctx.Request.Headers.Authorization.ToString();
-            if (!header.StartsWith("Bearer ", StringComparison.Ordinal) || hub.ChatByKey(header[7..]) is not { } chat)
-                return Results.Json(new { jsonrpc = "2.0", id = (object?)null, error = new { code = -32001, message = "Unknown or closed MK assistant chat" } }, statusCode: 401);
-            // Malformed messages get JSON-RPC errors (not the app's {code, message} 400/500), which the MCP client can show.
-            JsonObject? msg;
-            try { msg = await JsonNode.ParseAsync(ctx.Request.Body, cancellationToken: ct) as JsonObject; }
-            catch (JsonException) { return RpcError(null, -32700, "Parse error"); }
-            if (msg is null) return RpcError(null, -32600, "Expected one JSON-RPC request object");
-            var method = Text(msg["method"]) ?? "";
-            if (!msg.TryGetPropertyValue("id", out var id) || id is null) return Results.Accepted(); // notification
-            var parameters = msg["params"] as JsonObject;
-            JsonNode? result;
-            switch (method)
-            {
-                case "initialize":
-                    result = new JsonObject
-                    {
-                        ["protocolVersion"] = Text(parameters?["protocolVersion"]) ?? "2025-06-18",
-                        ["capabilities"] = new JsonObject { ["tools"] = new JsonObject { ["listChanged"] = false } },
-                        ["serverInfo"] = new JsonObject { ["name"] = AgentTools.ServerName, ["title"] = "MK Billing", ["version"] = typeof(AgentTools).Assembly.GetName().Version?.ToString() ?? "1" },
-                        ["instructions"] = "MK Billing: read HQ accounts, prepare bill drafts, and move the user's screen. Nothing here saves to HQ.",
-                    };
-                    break;
-                case "tools/list":
-                    result = new JsonObject { ["tools"] = tools.List() };
-                    break;
-                case "tools/call":
-                    if (Text(parameters?["name"]) is not { } tool) return RpcError(id, -32602, "tools/call needs params.name");
-                    result = await tools.CallAsync(chat, tool, parameters!["arguments"] as JsonObject ?? new JsonObject(), ct);
-                    break;
-                default:
-                    // Anything else (ping, newer discovery calls): an empty result, which clients read as "nothing special here".
-                    result = new JsonObject();
-                    break;
-            }
-            return Results.Json(new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id.DeepClone(), ["result"] = result });
-        });
-        app.MapGet("/mcp", () => Results.StatusCode(405));
-        app.MapDelete("/mcp", () => Results.Ok());
-        // The MCP client probes for OAuth metadata; say clearly there is none (instead of the SPA fallback page).
-        app.MapGet("/.well-known/{**rest}", () => Results.NotFound());
+        McpServer.Map(app);
 
         // ---- browser API ----
         var agent = api.MapGroup("/agent");
@@ -89,6 +47,12 @@ public static class AgentEndpoints
             if (hub.Chat(id) is not { } chat) return Gone();
             await hub.CancelAsync(chat);
             return Results.NoContent();
+        });
+        agent.MapPost("/chats/{id}/answer", (string id, AgentAnswerBody body, AgentHub hub) =>
+        {
+            if (body.Answer is { Length: > 1000 }) return Results.BadRequest(new { message = "Keep the answer under 1,000 characters" });
+            return hub.Chat(id) is { } chat && chat.Questions.TryGetValue(body.Id, out var question)
+                && question.TrySetResult(body.Answer?.Trim()) ? Results.NoContent() : Gone();
         });
         agent.MapPost("/chats/{id}/permission", (string id, AgentPermissionBody body, AgentHub hub) =>
             hub.Chat(id) is { } chat && hub.Answer(chat, body.Id, body.OptionId) ? Results.NoContent() : Gone());
@@ -135,8 +99,6 @@ public static class AgentEndpoints
 
     private static string? Text(JsonNode? n) => n is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
 
-    private static IResult RpcError(JsonNode? id, int code, string message) =>
-        Results.Json(new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id?.DeepClone(), ["error"] = new JsonObject { ["code"] = code, ["message"] = message } });
 
     private static IResult Gone() => Results.Json(new { code = "AGENT_CHAT_GONE", message = "This conversation has ended. Start a new one.", kind = "NotFound" }, statusCode: 404);
 

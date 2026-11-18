@@ -34,19 +34,34 @@ public sealed class DocumentService(
         return await ToPreviewAsync(s, firm, resolved, plan, next);
     }
 
-    public async Task<DocumentReceipt> PostAsync(string firmId, PostRequest post, CancellationToken ct = default)
+    public Task<DocumentReceipt> PostAsync(string firmId, PostRequest post, CancellationToken ct = default) =>
+        PostCoreAsync(firmId, post, requireReviewHash: true, ct);
+
+    /// <summary>Validates and posts an explicitly authorized external request in the normal write transaction.</summary>
+    public Task<DocumentReceipt> PostDirectAsync(string firmId, string operationId, DocumentRequest document, CancellationToken ct = default,
+        decimal? printedPurchaseTotal = null) =>
+        PostCoreAsync(firmId, new PostRequest(operationId, "", document), requireReviewHash: false, ct, printedPurchaseTotal);
+
+    private async Task<DocumentReceipt> PostCoreAsync(string firmId, PostRequest post, bool requireReviewHash, CancellationToken ct,
+        decimal? printedPurchaseTotal = null)
     {
         var firm = firms.Get(firmId);
         var receipt = await coordinator.RunAsync(new WriteRequest<DocumentReceipt>(
-            firm, post.OperationId, "document.create." + post.Document.Kind, RequestHash(post), [],
+            firm, post.OperationId, "document.create." + post.Document.Kind,
+            printedPurchaseTotal is null ? RequestHash(post) : RequestHash(new { post, printedPurchaseTotal }), [],
             async session =>
             {
                 // Settings read inside the write transaction: a cached copy could be up to 30 s old, and the plan-hash check
                 // could not then notice a settings change (round-off type, charge accounts) made since the review.
                 var profile = await FirmProfiles.LoadAsync(firm, session);
-                var resolved = await resolver.ResolveAsync(session, profile, post.Document);
+                var document = post.Document;
+                if (!requireReviewHash && document.Kind == DocumentKind.Purchase)
+                    document = await ResolveExternalSupplierAsync(session, document);
+                var resolved = await resolver.ResolveAsync(session, profile, document);
+                Guard.Require(printedPurchaseTotal is null || resolved.Quote.Payable == printedPurchaseTotal,
+                    "PURCHASE_TOTAL_MISMATCH", $"Printed total {printedPurchaseTotal:0.00} differs from calculated total {resolved.Quote.Payable:0.00}. Check the lines, discounts, charges and tax basis.");
                 var plan = DocumentPlanBuilder.Create(resolved, options.HqUserId, options.EffectiveMachineName);
-                Guard.Require(plan.Hash == post.ExpectedHash, "REVIEW_CHANGED",
+                Guard.Require(!requireReviewHash || plan.Hash == post.ExpectedHash, "REVIEW_CHANGED",
                     "Something in HQ changed since this bill was reviewed (rates, accounts, settings). Review it again.", FailureKind.Conflict);
                 return new PreparedWrite<DocumentReceipt>(plan, outcome =>
                 {
@@ -59,6 +74,21 @@ public sealed class DocumentService(
             }), ct);
         catalogue.Invalidate(firm.Id);
         return receipt;
+    }
+
+    private static async Task<DocumentRequest> ResolveExternalSupplierAsync(HqSession session, DocumentRequest document)
+    {
+        var gstin = document.Party?.Gstin;
+        var matches = (await session.QueryAsync<long>("""
+            SELECT DISTINCT CAST(a.Act_Id AS bigint)
+            FROM dbo.IQAccmst a JOIN dbo.IQAccAdr ad ON ad.Act_Id=a.Act_Id
+            WHERE a.Act_Cat='A' AND ISNULL(a.Act_Usage,0)=0 AND a.Act_Type IN ('Supplier','Customer-Supplier')
+              AND UPPER(LTRIM(RTRIM(ad.GSTIN)))=@gstin
+            """, new { gstin })).ToArray();
+        Guard.Require(matches.Length > 0, "SUPPLIER_NOT_FOUND", "No active supplier matches the printed GSTIN for this firm.");
+        Guard.Require(document.AccountId is { } accountId ? matches.Contains(accountId) : matches.Length == 1,
+            "SUPPLIER_ACCOUNT_UNRESOLVED", "Choose a supplier account that matches the printed GSTIN.", detail: new { accountIds = matches });
+        return document with { AccountId = document.AccountId ?? matches[0] };
     }
 
     internal static async Task<DocumentPreview> ToPreviewAsync(HqSession s, HqFirm firm, ResolvedDocument d, WritePlan plan, int nextNumber)

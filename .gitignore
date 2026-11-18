@@ -10,3 +10,9 @@ var-dev/
 Databases/
 *.bak
 __pycache__/
+
+/.dotnet/
+/artifacts/
+**/TestResults/
+/.agents/mcp_config.json
+/.agents/mcp_config.json.*

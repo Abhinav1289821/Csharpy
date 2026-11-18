@@ -72,14 +72,14 @@ public sealed class Catalogue
     /// shown on items, so a rename counts. Measured at about 25 ms on the MBM demo copy, every 3 s while a screen is open.
     /// </summary>
     public const string StampSql = """
-        SELECT CONCAT(
-          (SELECT CONCAT(COUNT(*),'.',ISNULL(MAX(Item_ID),0),'.',ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Item_ID,Item_Name,Item_Code,Item_Pack,CGST,SGST,IGST,HSNCODE,Item_Stat,Stk,Grp_ID,Cat_ID)),0)) FROM dbo.IQItems_Mast), '|',
-          (SELECT CONCAT(COUNT(*),'.',ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Item_ID,UNit_Id,Unit_Srate,Unit_Prate,Unit_MRP,PP_SaleRate,ReportPack)),0)) FROM dbo.IQItems_Units), '|',
-          (SELECT CONCAT(COUNT(*),'.',ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Grp_ID,Grp_Name)),0)) FROM dbo.IQGroups), '|',
-          (SELECT CONCAT(COUNT(*),'.',ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Item_CatID,Item_CatName)),0)) FROM dbo.IQItems_Cat), '|',
-          (SELECT CONCAT(COUNT(*),'.',ISNULL(MAX(Act_Id),0),'.',ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Act_Id,Act_Name,Act_Code,Act_Type,Act_Cat,Act_Usage,Bill2Bill,Act_OPbal,Act_OpSign)),0)) FROM dbo.IQAccmst), '|',
-          (SELECT CONCAT(COUNT(*),'.',ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Act_Id,Act_Town,Act_Ph1,Act_Cell,GSTIN,GSTTaxType,Act_state,Add_Line1,Add_Line2)),0)) FROM dbo.IQAccAdr), '|',
-          (SELECT CONCAT(COUNT(*),'.',ISNULL(MAX(SR_NO),0),'.',ISNULL(SUM(CAST(AMOUNT AS decimal(19,2))),0),'.',ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(SR_NO,Act_ID,Contra_ID,TYPE,AMOUNT,Doc_ID,TRDATE)),0)) FROM dbo.IQDayBook))
+        SELECT
+          (SELECT CONVERT(varchar(40),COUNT(*))+'.'+CONVERT(varchar(40),ISNULL(MAX(Item_ID),0))+'.'+CONVERT(varchar(40),ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Item_ID,Item_Name,Item_Code,Item_Pack,CGST,SGST,IGST,HSNCODE,Item_Stat,Stk,Grp_ID,Cat_ID)),0)) FROM dbo.IQItems_Mast) + '|' +
+          (SELECT CONVERT(varchar(40),COUNT(*))+'.'+CONVERT(varchar(40),ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Item_ID,UNit_Id,Unit_Srate,Unit_Prate,Unit_MRP,PP_SaleRate,ReportPack)),0)) FROM dbo.IQItems_Units) + '|' +
+          (SELECT CONVERT(varchar(40),COUNT(*))+'.'+CONVERT(varchar(40),ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Grp_ID,Grp_Name)),0)) FROM dbo.IQGroups) + '|' +
+          (SELECT CONVERT(varchar(40),COUNT(*))+'.'+CONVERT(varchar(40),ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Item_CatID,Item_CatName)),0)) FROM dbo.IQItems_Cat) + '|' +
+          (SELECT CONVERT(varchar(40),COUNT(*))+'.'+CONVERT(varchar(40),ISNULL(MAX(Act_Id),0))+'.'+CONVERT(varchar(40),ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Act_Id,Act_Name,Act_Code,Act_Type,Act_Cat,Act_Usage,Bill2Bill,Act_OPbal,Act_OpSign)),0)) FROM dbo.IQAccmst) + '|' +
+          (SELECT CONVERT(varchar(40),COUNT(*))+'.'+CONVERT(varchar(40),ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(Act_Id,Act_Town,Act_Ph1,Act_Cell,GSTIN,GSTTaxType,Act_state,Add_Line1,Add_Line2)),0)) FROM dbo.IQAccAdr) + '|' +
+          (SELECT CONVERT(varchar(40),COUNT(*))+'.'+CONVERT(varchar(40),ISNULL(MAX(SR_NO),0))+'.'+CONVERT(varchar(40),ISNULL(SUM(CAST(AMOUNT AS decimal(19,2))),0))+'.'+CONVERT(varchar(40),ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM(SR_NO,Act_ID,Contra_ID,TYPE,AMOUNT,Doc_ID,TRDATE)),0)) FROM dbo.IQDayBook)
         """;
 
     public async Task<CatalogueSnapshot> GetAsync(HqFirm firm, CancellationToken ct = default)

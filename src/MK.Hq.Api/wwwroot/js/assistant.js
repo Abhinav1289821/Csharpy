@@ -17,6 +17,7 @@ let current = null; // the assistant message being streamed: { node, text }
 let unloading = false; // a closing page's event stream errors too; that must not end the conversation
 window.addEventListener('pagehide', () => { unloading = true; });
 const tools = new Map(); // toolCallId -> row
+let activeQuestion = null;
 
 const store = {
   get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
@@ -28,6 +29,7 @@ const LABELS = {
   outstanding: 'Reading outstanding', list_bills: 'Listing bills', get_bill: 'Reading bill', day_summary: "Reading the day's figures",
   day_book: 'Reading day book', stock: 'Reading stock', gst_summary: 'Reading GST register', db_tables: 'Checking HQ tables',
   db_query: 'Querying HQ', current_screen: 'Checking your screen', open_screen: 'Opening screen', prepare_bill: 'Preparing draft',
+  ask_user: 'Waiting for your answer', shop_workflow: 'Checking shop rules', scan_bill: 'Scanning a page', scan_status: 'Checking the scan',
 };
 
 const SUGGESTIONS = [
@@ -35,6 +37,7 @@ const SUGGESTIONS = [
   'Who owes us the most? Show the top 10',
   'Items that went into negative stock',
   'Make an estimate for ',
+  'Scan a purchase bill',
 ];
 
 export function initAssistant({ selectFirm }) {
@@ -83,7 +86,7 @@ const screen = () => ({
 
 function onKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-  if (e.altKey && (e.key === 'a' || e.key === 'A')) return; // Alt+A still closes the panel
+  if (e.altKey && ['a', 'i'].includes(e.key.toLowerCase())) return; // Alt+A still closes the panel
   e.stopPropagation(); // typing here must not trigger the screens' F-keys or list keys
 }
 
@@ -111,6 +114,11 @@ async function send() {
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
+  if (activeQuestion) {
+    try { await answerQuestion(activeQuestion, text); }
+    catch (e) { input.value = text; toast(e.message, true); }
+    return;
+  }
   if (!(await ensureChat())) { input.value = text; return; }
   try {
     await post(`/agent/chats/${chatId}/prompt`, { text, ...screen() });
@@ -141,6 +149,7 @@ function forget() {
   setBusy(false);
   current = null;
   tools.clear();
+  activeQuestion = null;
 }
 
 async function setOption(configId, value) {
@@ -180,6 +189,7 @@ function connect() {
   source?.close();
   log.replaceChildren();
   tools.clear();
+  activeQuestion = null;
   current = null;
   const id = chatId;
   source = new EventSource(`/api/agent/chats/${id}/events?${tokenQuery()}`);
@@ -205,6 +215,16 @@ function apply(e) {
     case 'done': endMessage(); if (e.stopReason === 'cancelled') add(el('div', { class: 'as-note muted' }, 'Stopped.')); return;
     case 'error': endMessage(); return add(el('div', { class: 'issue err' }, e.message));
     case 'notice': return add(el('div', { class: 'issue warn' }, e.text));
+    case 'question': return questionCard(e, fresh);
+    case 'question-closed': {
+      const card = log.querySelector(`[data-question="${e.id}"]`);
+      const hadFocus = card?.contains(document.activeElement);
+      card?.querySelectorAll('button, input').forEach((control) => { control.disabled = true; });
+      card?.querySelector('.as-answer').replaceChildren(e.answer ? `You answered: ${e.answer}` : 'Question closed');
+      if (activeQuestion?.id === e.id) activeQuestion = null;
+      if (hadFocus && !panel.hidden) input.focus();
+      return;
+    }
     case 'permission': return permission(e);
     case 'permission-closed': { const b = log.querySelector(`[data-permission="${e.id}"]`); b?.querySelectorAll('button').forEach((x) => (x.disabled = true)); return; }
     case 'ui': if (fresh && e.action === 'navigate') navigate(e.firm, e.hash); return;
@@ -270,6 +290,34 @@ function toolRow(u) {
     if (msg && !row.querySelector('.as-fail')) row.append(el('div', { class: 'as-fail' }, msg));
   }
   statusLine.textContent = u.status === 'in_progress' || u.status === 'pending' ? (LABELS[name] ?? 'Working') + '…' : '';
+}
+
+async function answerQuestion(question, answer) {
+  const value = answer?.trim();
+  const match = /^([1-6])$/.exec(value ?? '');
+  const choice = match ? question.choices?.[Number(match[1]) - 1] : null;
+  await post(`/agent/chats/${chatId}/answer`, { id: question.id, answer: choice ?? value ?? null });
+}
+
+function questionCard(e, focus) {
+  endMessage();
+  activeQuestion = e;
+  const field = el('input', { type: 'text', maxlength: 1000, autocomplete: 'off',
+    'aria-label': 'Answer', placeholder: e.choices?.length ? 'Type an answer or choice number' : 'Type your answer' });
+  const submit = async (answer) => {
+    try { await answerQuestion(e, answer); }
+    catch (error) { toast(error.message, true); }
+  };
+  const card = el('form', { class: 'as-permission as-question', 'data-question': e.id,
+    onsubmit: (event) => { event.preventDefault(); if (field.value.trim()) submit(field.value); },
+    onkeydown: (event) => { if (event.key === 'Escape') { event.stopPropagation(); submit(null); } } },
+    el('p', {}, el('strong', {}, e.question)),
+    el('div', { class: 'row' }, (e.choices ?? []).map((choice, i) =>
+      el('button', { type: 'button', class: 'btn small', onclick: () => submit(choice) }, `${i + 1}. ${choice}`))),
+    el('div', { class: 'row' }, field, el('button', { type: 'submit', class: 'btn small primary' }, 'Reply')),
+    el('p', { class: 'as-answer muted', 'aria-live': 'polite' }));
+  add(card);
+  if (focus && !panel.hidden) field.focus();
 }
 
 function permission(e) {

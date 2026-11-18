@@ -153,7 +153,8 @@ public sealed class ReportsCacheTests
             Assert.Contains(column, Catalogue.StampSql);
         Assert.Contains("BINARY_CHECKSUM(SR_NO,Act_ID,Contra_ID,TYPE,AMOUNT", Catalogue.StampSql);
         // The live change feed appends to it, so it must stay one SELECT expression.
-        Assert.StartsWith("SELECT CONCAT(", Catalogue.StampSql.Trim());
+        Assert.StartsWith("SELECT", Catalogue.StampSql.Trim());
+        Assert.DoesNotContain("CONCAT(", Catalogue.StampSql, StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith(")", Catalogue.StampSql.Trim());
     }
 

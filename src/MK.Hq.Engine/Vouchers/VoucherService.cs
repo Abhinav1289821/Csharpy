@@ -273,7 +273,7 @@ public sealed class VoucherService(FirmRegistry firms, FirmProfiles profiles, Wr
         await s.QueryAsync<OpenItem>("""
             SELECT CAST(d.SR_NO AS bigint) EntryId, CAST(d.Doc_ID AS bigint) DocumentId,
               CASE WHEN d.Doc_ID=-1 THEN 'Opening balance' ELSE RTRIM(ISNULL(d.Tseries,''))+'/'+CAST(ISNULL(d.Tno,0) AS varchar(12)) END Reference, RTRIM(ISNULL(t.Ttype,'Opening')) TypeName,
-              CAST(d.trdate AS date) Date, CAST(h.Doc_Duedate AS date) DueDate, LEFT(LTRIM(d.TYPE),1) Side,
+              DATEADD(day,DATEDIFF(day,0,d.trdate),0) Date, DATEADD(day,DATEDIFF(day,0,h.Doc_Duedate),0) DueDate, LEFT(LTRIM(d.TYPE),1) Side,
               CAST(d.AMOUNT AS decimal(19,2)) Amount, CAST(ISNULL(d.BL_adjusted,0)-r.Released AS decimal(19,2)) Allocated,
               CAST(d.AMOUNT-ISNULL(d.BL_adjusted,0)+r.Released AS decimal(19,2)) [Open], DATEDIFF(day, d.trdate, GETDATE()) AgeDays
             FROM dbo.IQDayBook d LEFT JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_ID LEFT JOIN dbo.TTypes t ON t.TT_ID=h.Tt_Id

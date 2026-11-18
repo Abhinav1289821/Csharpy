@@ -31,7 +31,7 @@ public sealed class VoucherParityTests(ITestOutputHelper output)
     public async Task Engine_writes_vouchers_as_HQ_does(string firmId, string database, string backup)
     {
         await ScratchDatabase.RestoreAsync(database, backup);
-        await using var provider = ScratchDatabase.Engine(firmId, database);
+        await using var provider = await ScratchDatabase.EngineAsync(firmId, database);
         var vouchers = provider.GetRequiredService<VoucherService>();
         await using var cn = new SqlConnection(TestDatabase.ConnectionString(database));
         var heads = (await cn.QueryAsync<Head>("""

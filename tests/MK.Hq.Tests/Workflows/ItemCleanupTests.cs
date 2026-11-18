@@ -15,7 +15,7 @@ public sealed class ScratchCleanupMbm : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await ScratchDatabase.RestoreAsync(Database, "ISTMBM26.bak");
-        Engine = ScratchDatabase.Engine("mbm", Database, DataDirectory);
+        Engine = await ScratchDatabase.EngineAsync("mbm", Database, DataDirectory);
     }
     public async Task DisposeAsync() => await Engine.DisposeAsync();
 }

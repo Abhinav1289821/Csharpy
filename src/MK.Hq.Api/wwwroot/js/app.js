@@ -39,7 +39,7 @@ const routes = [
   [/^#\/stock$/, (m, v) => stockView(v)],
   [/^#\/drafts$/, (m, v) => draftsView(v)],
   [/^#\/health$/, (m, v) => healthView(v)],
-  [/^#\/capture$/, (m, v) => captureView(v)],
+  [/^#\/capture(?:\/([a-z0-9-]+))?$/, (m, v) => captureView(v, m[1])],
   [/^#\/settings$/, (m, v) => settingsView(v)],
 ];
 
@@ -66,7 +66,8 @@ function connectLive() {
   const live = $('#live');
   const text = $('#live-text');
   events = new EventSource(eventsUrl(state.firm.id));
-  events.onopen = () => { live.className = 'live on'; text.textContent = 'Live with HQ'; };
+  events.onopen = () => { live.className = 'live off'; text.textContent = 'Checking HQ…'; };
+  events.addEventListener('online', () => { live.className = 'live on'; text.textContent = 'Live with HQ'; });
   events.addEventListener('changed', async () => {
     await loadCatalogue().catch(() => {});
     // Lists (dashboard, bills, outstanding, stock, ledger) subscribe to this and refresh their figures in place, keeping
@@ -75,6 +76,7 @@ function connectLive() {
     notify('changed');
   });
   events.addEventListener('offline', () => { live.className = 'live off'; text.textContent = 'HQ database offline'; });
+  events.addEventListener('feed-error', () => { live.className = 'live off'; text.textContent = 'Live updates unavailable'; });
   events.onerror = () => { live.className = 'live off'; text.textContent = 'Reconnecting…'; };
 }
 
@@ -99,7 +101,51 @@ async function selectFirm(id) {
   route();
 }
 
+function initMenu() {
+  const menu = $('#main-menu') ?? $('.sidebar');
+  const header = $('.letterhead');
+  if (!menu || !header) return;
+  menu.id ||= 'main-menu';
+  let button = $('#menu-toggle');
+  if (!button) {
+    let brand = $('.brand', header);
+    if (!brand) {
+      brand = el('div', { class: 'brand' });
+      const mark = $('.mark', header);
+      if (mark) { mark.before(brand); brand.append(mark); }
+      else header.prepend(brand);
+    }
+    button = el('button', { type: 'button', class: 'menu-toggle', id: 'menu-toggle' }, '☰');
+    brand.prepend(button);
+  }
+  button.setAttribute('aria-controls', menu.id);
+  const key = 'mk-hq-menu-collapsed';
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(key) === '1'; } catch { /* private mode */ }
+  function render() {
+    menu.hidden = collapsed;
+    document.body.classList.toggle('menu-collapsed', collapsed);
+    button.setAttribute('aria-expanded', String(!collapsed));
+    button.setAttribute('aria-label', collapsed ? 'Show menu' : 'Hide menu');
+    button.title = collapsed ? 'Show menu' : 'Hide menu';
+  }
+  function toggleMenu() {
+    collapsed = !collapsed;
+    try { localStorage.setItem(key, collapsed ? '1' : '0'); } catch { /* private mode */ }
+    render();
+  }
+  button.addEventListener('click', toggleMenu);
+  document.addEventListener('keydown', (e) => {
+    if (e.altKey && !e.ctrlKey && !e.repeat && e.key.toLowerCase() === 'm') {
+      e.preventDefault();
+      toggleMenu();
+    }
+  }, true);
+  render();
+}
+
 async function start() {
+  initMenu();
   if (!initToken()) {
     view.replaceChildren(el('h1', {}, 'MK Billing'), el('p', {}, 'Open MK Billing from its desktop launcher; it brings the access key.'));
     return;

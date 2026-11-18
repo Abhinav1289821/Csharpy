@@ -8,10 +8,10 @@ namespace MK.Hq.Api;
 /// <summary>The local access key the launcher hands to the browser (in the URL fragment, never sent to a server log).</summary>
 public static class ApiToken
 {
-    public static string LoadOrCreate(string dataDirectory)
+    public static string LoadOrCreate(string dataDirectory, string fileName = "api.token")
     {
         Directory.CreateDirectory(dataDirectory);
-        var path = Path.Combine(dataDirectory, "api.token");
+        var path = Path.Combine(dataDirectory, fileName);
         if (File.Exists(path))
         {
             var existing = File.ReadAllText(path).Trim();

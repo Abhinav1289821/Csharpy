@@ -22,9 +22,27 @@ function Test-Ours {
 if (-not (Test-Up)) {
   if (@(Get-NetTCPConnection -LocalPort 47320 -State Listen -ErrorAction SilentlyContinue).Count) { throw "Port 47320 is used by another program; nothing was started." }
   if ($mode -eq "live") {
-    Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -WindowStyle Hidden
+    $credentialPath = Join-Path $env:LOCALAPPDATA "MK HQ Billing\sql-credential.xml"
+    if (Test-Path -LiteralPath $credentialPath) {
+      $credential = New-Object System.Management.Automation.PSCredential("MkHqBilling", (Import-Clixml -LiteralPath $credentialPath))
+      $previousUser = $env:Hq__UserId
+      $previousPassword = $env:Hq__Password
+      try {
+        $env:Hq__UserId = $credential.UserName
+        $env:Hq__Password = $credential.GetNetworkCredential().Password
+        Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -WindowStyle Hidden
+      } finally {
+        $env:Hq__UserId = $previousUser
+        $env:Hq__Password = $previousPassword
+      }
+    } else {
+      Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -WindowStyle Hidden
+    }
   } else {
-    Start-Process -FilePath dotnet -ArgumentList @("run","--project",(Join-Path $root "src\MK.Hq.Api"),"--environment","Development","--urls",$url) -WorkingDirectory $root -WindowStyle Hidden
+    $dotnet = Join-Path $root ".dotnet\dotnet.exe"
+    if (-not (Test-Path -LiteralPath $dotnet)) { $dotnet = "dotnet" }
+    $project = Join-Path $root "src\MK.Hq.Api\MK.Hq.Api.csproj"
+    Start-Process -FilePath $dotnet -ArgumentList @("run","--project",('"' + $project + '"'),"--environment","Development","--urls",$url) -WorkingDirectory $root -WindowStyle Hidden
   }
   for ($i = 0; $i -lt 120 -and -not (Test-Up); $i++) { Start-Sleep -Milliseconds 500 }
   if (-not (Test-Up)) { throw "MK HQ Billing did not start. Run it in a console to see why." }

@@ -23,7 +23,7 @@ public sealed class ScratchHealth : IAsyncLifetime
         await ScratchDatabase.RestoreAsync(Mbm, Latest("ISTMBM26"));
         await ScratchDatabase.RestoreAsync(Mp, Latest("ISTMP26"));
         await ScratchDatabase.RestoreAsync(Main, Latest("ISTMAIN"));
-        Engine = ScratchDatabase.Engine("mbm", Mbm, configure: o =>
+        Engine = await ScratchDatabase.EngineAsync("mbm", Mbm, configure: o =>
         {
             o.Firms =
             [

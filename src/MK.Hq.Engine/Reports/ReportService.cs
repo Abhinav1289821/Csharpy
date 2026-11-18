@@ -179,7 +179,7 @@ public sealed class ReportService(FirmRegistry firms, IHqClock clock)
         var before = await s.ScalarAsync<decimal>($"SELECT CAST(ISNULL(SUM(Debit-Credit),0) AS decimal(19,2)) FROM ({Movement}) m WHERE m.trdate < @from",
             new { account = accountId, from = fromAt });
         var lines = await s.QueryAsync<LedgerLine>($"""
-            SELECT CAST(m.trdate AS date) Date, CAST(m.Doc_ID AS bigint) DocumentId, RTRIM(ISNULL(m.Tseries,''))+'/'+CAST(ISNULL(m.Tno,0) AS varchar(12)) Reference,
+            SELECT DATEADD(day,DATEDIFF(day,0,m.trdate),0) Date, CAST(m.Doc_ID AS bigint) DocumentId, RTRIM(ISNULL(m.Tseries,''))+'/'+CAST(ISNULL(m.Tno,0) AS varchar(12)) Reference,
               RTRIM(ISNULL(t.Ttype,'')) TypeName, LTRIM(RTRIM(ISNULL(m.Narration,''))) Narration,
               LTRIM(RTRIM(ISNULL(c.Act_Name,''))) Contra, CAST(m.Debit AS decimal(19,2)) Debit, CAST(m.Credit AS decimal(19,2)) Credit
             FROM ({Movement}) m LEFT JOIN dbo.IQDoc_Header h ON h.Doc_Id=m.Doc_ID LEFT JOIN dbo.TTypes t ON t.TT_ID=h.Tt_Id
@@ -210,7 +210,7 @@ public sealed class ReportService(FirmRegistry firms, IHqClock clock)
             """, new { side });
         // The entries that add to it: debits (D, and P paid out to the party) for customers; credits (C, R) for suppliers.
         var entries = (await s.QueryAsync<DueEntry>($"""
-            SELECT CAST(d.Act_ID AS bigint) AccountId, CAST(d.TRDATE AS date) Date, CAST(d.SR_NO AS bigint) [Order], CAST(d.AMOUNT AS decimal(19,2)) Amount,
+            SELECT CAST(d.Act_ID AS bigint) AccountId, DATEADD(day,DATEDIFF(day,0,d.TRDATE),0) Date, CAST(d.SR_NO AS bigint) [Order], CAST(d.AMOUNT AS decimal(19,2)) Amount,
               CAST(CASE WHEN ISNULL(a.Bill2Bill,0)=1 THEN d.AMOUNT-ISNULL(d.BL_adjusted,0) ELSE d.AMOUNT END AS decimal(19,2)) [Open]
             FROM dbo.IQDayBook d JOIN dbo.IQAccmst a ON a.Act_Id=d.Act_ID
             WHERE {PartyAccounts("a")} AND d.TYPE IN (@t1, @t2)
@@ -263,7 +263,7 @@ public sealed class ReportService(FirmRegistry firms, IHqClock clock)
     {
         var (fromAt, until) = Range(from, to);
         return await s.QueryAsync<DayBookRow>("""
-            SELECT TOP (@take) CAST(h.Doc_Id AS bigint) DocumentId, CAST(h.Doc_Date AS date) Date, RTRIM(ISNULL(t.Ttype,'')) TypeName,
+            SELECT TOP (@take) CAST(h.Doc_Id AS bigint) DocumentId, DATEADD(day,DATEDIFF(day,0,h.Doc_Date),0) Date, RTRIM(ISNULL(t.Ttype,'')) TypeName,
               RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) Reference,
               LTRIM(RTRIM(CASE WHEN h.Mode=1 OR ISNULL(c.Act_Name,'')='' THEN ISNULL(a.Act_Name,'') ELSE c.Act_Name END)) Party,
               CAST(ISNULL(h.Mode,0) AS int) Mode, CAST(ISNULL(h.Bill_Amt,0) AS decimal(19,2)) Amount, LTRIM(RTRIM(ISNULL(h.Narration,''))) Narration
@@ -283,7 +283,7 @@ public sealed class ReportService(FirmRegistry firms, IHqClock clock)
         var (fromAt, until) = Range(from, to);
         var args = new { from = fromAt, until };
         var rows = await s.QueryAsync<RegisterRow>($"""
-            SELECT CAST(h.Doc_Id AS bigint) DocumentId, CAST(h.Doc_Date AS date) Date, RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) Reference,
+            SELECT CAST(h.Doc_Id AS bigint) DocumentId, DATEADD(day,DATEDIFF(day,0,h.Doc_Date),0) Date, RTRIM(h.TSeries)+'/'+CAST(h.TNo AS varchar(12))+RTRIM(ISNULL(h.TExtn,'')) Reference,
               LTRIM(RTRIM(ISNULL(h.Supp_Billno,''))) SupplierBill,
               LTRIM(RTRIM(CASE WHEN h.Mode=1 OR ISNULL(c.Act_Name,'')='' THEN ISNULL(a.Act_Name,'') ELSE c.Act_Name END)) Party,
               UPPER(LTRIM(RTRIM(CASE WHEN h.Mode=1 THEN ISNULL(ad.GSTIN,'') ELSE ISNULL(c.GSTIN,'') END))) Gstin, CAST(ISNULL(h.Mode,0) AS int) Mode,
@@ -329,7 +329,7 @@ public sealed class ReportService(FirmRegistry firms, IHqClock clock)
               LTRIM(RTRIM(COALESCE(NULLIF(LTRIM(RTRIM(iu.ReportPack)),''), im.Item_Pack, ''))) Unit, CAST(ISNULL(im.Stk,0) AS decimal(19,3)) Stock,
               CAST(ISNULL(iu.Unit_Prate,0) AS decimal(19,2)) PurchaseRate, CAST(ISNULL(COALESCE(iu.PP_SaleRate, iu.Unit_Srate),0) AS decimal(19,2)) SaleRate,
               CAST(ISNULL(im.Stk,0)*ISNULL(iu.Unit_Prate,0) AS decimal(19,2)) Value,
-              (SELECT CAST(MAX(h.Doc_Date) AS date) FROM dbo.IQDoc_Delv d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_ID WHERE d.Item_ID=im.Item_ID) LastSale
+              (SELECT DATEADD(day,DATEDIFF(day,0,MAX(h.Doc_Date)),0) FROM dbo.IQDoc_Delv d JOIN dbo.IQDoc_Header h ON h.Doc_Id=d.Doc_ID WHERE d.Item_ID=im.Item_ID) LastSale
             FROM dbo.IQItems_Mast im JOIN dbo.IQItems_Units iu ON iu.Item_ID=im.Item_ID LEFT JOIN dbo.IQGroups g ON g.Grp_ID=im.Grp_ID
             WHERE ISNULL(im.Item_Stat,0)=0 ORDER BY im.Item_Name
             """);

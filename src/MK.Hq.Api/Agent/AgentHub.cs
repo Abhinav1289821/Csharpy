@@ -56,6 +56,7 @@ public sealed class AgentChat
     public bool Busy { get; set; }
     public bool NeedsInstructions { get; set; }
     public string Title { get; set; } = "New conversation";
+    public ConcurrentDictionary<string, TaskCompletionSource<string?>> Questions { get; } = new();
     public ConcurrentDictionary<string, TaskCompletionSource<string?>> Permissions { get; } = new();
     public ConcurrentDictionary<string, string> ToolTitles { get; } = new();
 
@@ -121,6 +122,9 @@ public sealed partial class AgentHub : IAsyncDisposable
         Directory.CreateDirectory(_workspace);
         // Antigravity reads workspace rules; the same guidance is also given per session (see Instructions).
         File.WriteAllText(Path.Combine(_workspace, "AGENTS.md"), AgentTools.Instructions);
+        var skill = Path.Combine(_workspace, ".agents", "skills", "mk-shop");
+        Directory.CreateDirectory(skill);
+        File.WriteAllText(Path.Combine(skill, "SKILL.md"), AgentTools.ShopSkill);
         // Photo reads get a workspace of their own, so the assistant's rules (and its tools) are not in play there.
         _readerWorkspace = Path.Combine(hq.DataDirectory, "photo-reader");
         Directory.CreateDirectory(_readerWorkspace);
@@ -365,6 +369,7 @@ public sealed partial class AgentHub : IAsyncDisposable
     public async Task CancelAsync(AgentChat chat)
     {
         foreach (var p in chat.Permissions.Values) p.TrySetResult(null);
+        foreach (var q in chat.Questions.Values) q.TrySetResult(null);
         // Best effort: the agent may die between the Alive check and the write. A failed cancel must not turn the Stop
         // button into a server error, nor stop CloseAsync from forgetting the chat (and its MCP key).
         if (_acp is { Alive: true } acp)
